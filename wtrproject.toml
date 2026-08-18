@@ -1,0 +1,10 @@
+format_version = 1
+
+[project]
+name = "Motor_test"
+ioc_file = "Motor_test.ioc"
+
+[dependencies]
+packages = [
+    "utils",
+]
