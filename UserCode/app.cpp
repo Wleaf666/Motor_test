@@ -6,10 +6,15 @@ uint16_t ADC_Value[2];
 
 void ADC_init()
 {
-    if (HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED)!=HAL_OK)
-        Error_Handler;
+    if (HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
     if (HAL_ADC_Start_DMA(&hadc2, (uint32_t*)ADC_Value, 2) != HAL_OK)
-        Error_Handler;
+    {
+        Error_Handler();
+    }
 }
 
 extern "C" void Init(void* argument)
