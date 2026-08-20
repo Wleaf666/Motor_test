@@ -10,6 +10,7 @@ set(WTR_MANAGED_REPOSITORIES
 )
 
 set(WTR_MANAGED_PACKAGE_DIRS
+    Modules/BasicComponents/libs/control/pid_motor
     Modules/BasicComponents/utils
 )
 
@@ -25,10 +26,12 @@ foreach(_wtr_package_dir IN LISTS WTR_MANAGED_PACKAGE_DIRS)
 endforeach()
 
 set(WTR_DIRECT_PACKAGE_TARGETS
+    libs::PIDMotor
     utils
 )
 
 set(WTR_RESOLVED_PACKAGE_TARGETS
+    libs::PIDMotor
     utils
     stm32cubemx
 )
