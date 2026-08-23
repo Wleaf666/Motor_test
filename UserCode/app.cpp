@@ -6,15 +6,20 @@
 
 #include "pid_motor.hpp"
 
-volatile uint16_t  ADC_Value[2];
-float     Raw_V_target = 12.0;
-PIDMotor* V_pid        = nullptr;
+const float     V_in        = 24.0;
+constexpr float PWM_CNT_MAX = 3599 * 0.9;
 
-const int Rtop=82;
+volatile uint16_t ADC_Value[2];
+float             V_target = 12.0;
+PIDMotor*         V_pid    = nullptr;
+
+const int Rtop    = 82;
 const int Rbottom = 10;
 
-const float Vref = 3.3f;
+const float Vref    = 3.3f;
 const float ADC_MAX = 4095.0f;
+
+PIDMotor::Config cfg = { .Kp = 1000.0, .Ki = 1.0, .Kd = 0.0, .abs_output_max = PWM_CNT_MAX };
 
 void ADC_init()
 {
@@ -24,33 +29,41 @@ void ADC_init()
 
 void PID_init()
 {
-    PIDMotor::Config cfg = { .Kp = 0.01, .Ki = 0.01, .Kd = 0.0, .abs_output_max = 199.0 };
-    V_pid                = new PIDMotor(cfg);
+    V_pid = new PIDMotor(cfg);
 }
+
+float adc_V;
+float V_feedback;
+float output;
+float pwm_output;
 
 extern "C" void TIM2_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
-    uint16_t raw_V    = ADC_Value[1];
-    float    adc_V        = raw_V / ADC_MAX * Vref;
-    float    V_target = Raw_V_target * Rbottom / (Rtop + Rbottom);
-    float    output_voltage     = V_pid->calc(V_target, adc_V);
-    output_voltage              = std::clamp(output_voltage, 0.0f, 199.0f);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, static_cast<uint32_t>(output_voltage));
+    uint16_t raw_V = ADC_Value[1];
+    adc_V          = raw_V / ADC_MAX * Vref;
+    V_feedback     = adc_V * (Rbottom + Rtop) / Rbottom;
+    pwm_output     = V_pid->calc(V_target, V_feedback);
+    pwm_output     = std::clamp(pwm_output, 0.0f, PWM_CNT_MAX);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, static_cast<uint32_t>(pwm_output));
 }
+
 
 void TIM_init()
 {
     HAL_TIM_RegisterCallback(&htim2, HAL_TIM_PERIOD_ELAPSED_CB_ID, TIM2_PeriodElapsedCallback);
+
     HAL_TIM_Base_Start_IT(&htim2);
+
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 }
 
 extern "C" void Init(void* argument)
 {
     /* 初始化代码 */
-    ADC_init();
+
     PID_init();
     TIM_init();
+    ADC_init();
 
     /* 初始化完成后退出线程 */
     osThreadExit();
