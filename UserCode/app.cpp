@@ -19,7 +19,7 @@ const int Rbottom = 10;
 const float Vref    = 3.3f;
 const float ADC_MAX = 4095.0f;
 
-PIDMotor::Config cfg = { .Kp = 1000.0, .Ki = 1.0, .Kd = 0.0, .abs_output_max = PWM_CNT_MAX };
+PIDMotor::Config cfg = { .Kp = 5000.0, .Ki = 20.0, .Kd = 0.0, .abs_output_max = PWM_CNT_MAX };
 
 void ADC_init()
 {
@@ -46,7 +46,6 @@ extern "C" void TIM2_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
     pwm_output     = std::clamp(pwm_output, 0.0f, PWM_CNT_MAX);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, static_cast<uint32_t>(pwm_output));
 }
-
 
 void TIM_init()
 {
