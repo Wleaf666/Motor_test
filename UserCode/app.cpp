@@ -6,18 +6,20 @@
 
 #include "pid_motor.hpp"
 
-const float     V_in        = 24.0;
+extern DMA_HandleTypeDef hdma_adc2;
+
+constexpr float V_in        = 24.0;
 constexpr float PWM_CNT_MAX = 3599 * 0.9;
 
 volatile uint16_t ADC_Value[2];
 float             V_target = 12.0;
 PIDMotor*         V_pid    = nullptr;
 
-const int Rtop    = 82;
-const int Rbottom = 10;
+constexpr int Rtop    = 82;
+constexpr int Rbottom = 10;
 
-const float Vref    = 3.3f;
-const float ADC_MAX = 4095.0f;
+constexpr float Vref    = 3.3f;
+constexpr float ADC_MAX = 4095.0f;
 
 PIDMotor::Config cfg = { .Kp = 5000.0, .Ki = 20.0, .Kd = 0.0, .abs_output_max = PWM_CNT_MAX };
 
@@ -25,6 +27,7 @@ void ADC_init()
 {
     HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
     HAL_ADC_Start_DMA(&hadc2, (uint32_t*)ADC_Value, 2);
+
 }
 
 void PID_init()
@@ -60,9 +63,11 @@ extern "C" void Init(void* argument)
 {
     /* 初始化代码 */
 
+    ADC_init();
+
     PID_init();
     TIM_init();
-    ADC_init();
+    
 
     /* 初始化完成后退出线程 */
     osThreadExit();
