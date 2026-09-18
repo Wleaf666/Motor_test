@@ -90,8 +90,26 @@ void TIM_init()
 
 void ADS1220_init()
 {
-    ADS1220_ = new ADS1220(&hspi1, ADS1220::Gain::X128, 5.0f);
-    ADS1220_->Init();
+    ADS1220::Config cfg{};
+
+    cfg.input              = ADS1220::InputMux::Ain0Ain1;
+    cfg.gain               = ADS1220::Gain::X128;
+    cfg.data_rate          = ADS1220::DataRate::Normal330;
+    cfg.conversion_mode    = ADS1220::ConversionMode::Continuous;
+    cfg.voltage_reference  = ADS1220::VoltageReference::ExternalRef0;
+    cfg.reference_voltage  = 5.0f;
+    cfg.filter             = ADS1220::FirFilter::None;
+    cfg.bypass_pga         = false;
+    cfg.temperature_sensor = false;
+    cfg.burn_out_sources   = false;
+    cfg.low_side_switch    = false;
+    cfg.idac_current       = ADS1220::IdacCurrent::Off;
+    cfg.idac1_route        = ADS1220::IdacRoute::Disabled;
+    cfg.idac2_route        = ADS1220::IdacRoute::Disabled;
+    cfg.dout_drdy_enabled  = false;
+
+    static ADS1220 adc(&hspi1, cfg);
+    ADS1220_ = &adc;
 }
 
 void Task_get_torque(void* argument)
@@ -112,7 +130,7 @@ extern "C" void Init(void* argument)
     PID_init();
     TIM_init();
     ADS1220_init();
-    osThreadNew(Task_get_torque,nullptr, nullptr);
+    osThreadNew(Task_get_torque, nullptr, nullptr);
 
     /* 初始化完成后退出线程 */
     osThreadExit();
