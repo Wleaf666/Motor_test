@@ -10,6 +10,25 @@
 
 ADS1220::ADS1220(SPI_HandleTypeDef* hspi, const Config& config) : hspi_(hspi), Config_(config) {}
 
+ADS1220::Status ADS1220::Calibrate()
+{
+    CodeOffset_           = 0;
+    ADS1220::InputMux cpy = Config_.input;
+    Config_.input         = ADS1220::InputMux::ShortedMidSupply;
+    Configure(Config_);
+    int samples = 200;
+    int sum     = 0;
+    for (int64_t i = 0; i < samples; i++)
+    {
+        Update();
+        sum += RawValue_;
+    }
+    CodeOffset_   = sum / samples;
+    Config_.input = cpy;
+    Configure(Config_);
+    return ADS1220::Status::Ok;
+}
+
 ADS1220::Status ADS1220::Init()
 {
     // 初始化顺序固定为：参数校验 -> 芯片复位 -> 写寄存器 -> 读回校验 -> 启动转换。
@@ -42,6 +61,7 @@ ADS1220::Status ADS1220::Init()
     {
         Initialized_ = true;
     }
+    LastStatus_ = Calibrate();
     return LastStatus_;
 }
 
@@ -362,7 +382,7 @@ void ADS1220::DecodeValue(const uint8_t data[3])
 
     // 模拟输入模式下：VIN = Code × VREF / (Gain × 2^23)。
     // 选择内部参考时，芯片固定使用 2.048 V，不采用 Config_ 中的外部参考电压值。
-
+    RawValue_                     = RawValue_ - CodeOffset_;
     const float reference_voltage = Config_.voltage_reference == VoltageReference::Internal2048
                                             ? 2.048f
                                             : Config_.reference_voltage;

@@ -213,14 +213,14 @@ public:
         bool             dout_drdy_enabled;  ///< 是否让 DOUT/DRDY 同步指示数据就绪。
     };
 
-
-
     /**
      * @brief 使用完整配置构造 ADC。
      * @param hspi STM32 HAL SPI 句柄，生命周期必须长于本对象且不能为 nullptr。
      * @param config 高层功能配置；构造阶段只保存，Init() 时才写入芯片。
      */
     explicit ADS1220(SPI_HandleTypeDef* hspi, const Config& config);
+
+    Status Calibrate();
 
     /** @brief 复位芯片、校验配置、写入并读回寄存器，最后启动转换。 */
     Status Init();
@@ -329,11 +329,12 @@ private:
     SPI_HandleTypeDef* hspi_ = nullptr;
 
     // 当前配置及最近一次有效测量结果均由对象内部保存，业务层只能只读访问。
-    Config  Config_      = {};
-    int32_t RawValue_    = 0;
-    float   Voltage_     = 0.0f;
-    float   Temperature_ = 0.0f;
-    Status  LastStatus_  = Status::NotInitialized;
-    bool    Initialized_ = false;
-    float   GainVoltage_ = 0.0f;
+    Config  Config_        = {};
+    int32_t RawValue_      = 0;
+    float   Voltage_       = 0.0f;
+    float   Temperature_   = 0.0f;
+    Status  LastStatus_    = Status::NotInitialized;
+    bool    Initialized_   = false;
+    float   GainVoltage_   = 0.0f;
+    int   CodeOffset_ = 0;
 };

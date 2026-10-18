@@ -15,14 +15,15 @@ constexpr float V_in        = 24.0;
 constexpr float PWM_CNT_MAX = 3599 * 0.9;
 constexpr float Vref        = 3.3f;
 
-volatile uint16_t ADC_Value[2];
-float             V_target      = 6.0;
-float             Torque_target = 2.0;
-PIDMotor*         V_pid         = nullptr;
-PIDMotor*         Torque_pid    = nullptr;
+uint16_t ADC_Value[2];
+float    V_target = 8.0;
+
+PIDMotor* V_pid      = nullptr;
+PIDMotor* Torque_pid = nullptr;
 
 float Torque_feedback  = 0.0f;
 float Torque_Vfeedback = 0.0f;
+float Torque_target    = 4.0f;
 
 ADS1220* ADS1220_ = nullptr;
 
@@ -63,14 +64,14 @@ void TIM2_Vout_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, static_cast<uint32_t>(pwm_output));
 }
 
-constexpr float Vrange      = 0.96;
-constexpr float TorqueRange = 12.0f;
+constexpr float Vrange      = 0.0075*128;
+constexpr float TorqueRange = 20.0f;
 
 void TIM3_Torque_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
     Torque_feedback = Torque_Vfeedback / Vrange * TorqueRange;
-    V_target        = Torque_pid->calc(Torque_target, Torque_feedback);
-    V_target        = std::clamp(V_target, 0.0f, MAX_VOUT);
+    // V_target        = Torque_pid->calc(Torque_target, Torque_feedback);
+    // V_target        = std::clamp(V_target, 0.0f, MAX_VOUT);
 }
 
 void TIM_init()
@@ -94,11 +95,11 @@ void ADS1220_init()
 
     cfg.input              = ADS1220::InputMux::Ain0Ain1;
     cfg.gain               = ADS1220::Gain::X128;
-    cfg.data_rate          = ADS1220::DataRate::Normal330;
+    cfg.data_rate          = ADS1220::DataRate::Normal20;
     cfg.conversion_mode    = ADS1220::ConversionMode::Continuous;
     cfg.voltage_reference  = ADS1220::VoltageReference::ExternalRef0;
     cfg.reference_voltage  = 5.0f;
-    cfg.filter             = ADS1220::FirFilter::None;
+    cfg.filter             = ADS1220::FirFilter::Reject50And60;
     cfg.bypass_pga         = false;
     cfg.temperature_sensor = false;
     cfg.burn_out_sources   = false;
@@ -108,28 +109,31 @@ void ADS1220_init()
     cfg.idac2_route        = ADS1220::IdacRoute::Disabled;
     cfg.dout_drdy_enabled  = false;
 
-    static ADS1220 adc(&hspi1, cfg);
-    ADS1220_ = &adc;
+    ADS1220_ = new ADS1220(&hspi1, cfg);
+    ADS1220_->Init();
 }
+
+float Vref_5V = 5.0;
 
 void Task_get_torque(void* argument)
 {
     for (;;)
     {
+        Vref_5V = ADC_Value[0] / ADC_MAX * Vref;
         ADS1220_->Update();
-        Torque_Vfeedback = std::abs(ADS1220_->GetVoltage());
+        Torque_Vfeedback = ADS1220_->GetGainVoltage();
     }
 }
 
 extern "C" void Init(void* argument)
 {
     /* 初始化代码 */
-
+    ADS1220_init();
     ADC_init();
 
     PID_init();
     TIM_init();
-    ADS1220_init();
+
     osThreadNew(Task_get_torque, nullptr, nullptr);
 
     /* 初始化完成后退出线程 */
