@@ -89,7 +89,7 @@ void TIM_init()
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 }
 
-void ADS1220_init()
+bool ADS1220_init()
 {
     ADS1220::Config cfg{};
 
@@ -110,7 +110,8 @@ void ADS1220_init()
     cfg.dout_drdy_enabled  = false;
 
     ADS1220_ = new ADS1220(&hspi1, cfg);
-    ADS1220_->Init();
+    // Init() 内部自动完成偏移校准，失败时不启动后续控制和采样。
+    return ADS1220_->Init() == ADS1220::Status::Ok;
 }
 
 float Vref_5V = 5.0;
@@ -128,7 +129,11 @@ void Task_get_torque(void* argument)
 extern "C" void Init(void* argument)
 {
     /* 初始化代码 */
-    ADS1220_init();
+    if (!ADS1220_init())
+    {
+        osThreadExit();
+        return;
+    }
     ADC_init();
 
     PID_init();

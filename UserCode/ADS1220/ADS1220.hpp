@@ -220,9 +220,20 @@ public:
      */
     explicit ADS1220(SPI_HandleTypeDef* hspi, const Config& config);
 
+    /**
+     * @brief 通过内部短接完成 ADC 自身偏移校准，Init() 会自动调用。
+     *
+     * 保持当前增益和参考源，短接 PGA 两端至电源中点，等待并平均 32 次独立转换，
+     * 再恢复原通道和转换模式。GetRawValue()、GetVoltage()、GetGainVoltage()
+     * 的后续结果均扣除偏移；失败时不更新原校准值，无法恢复硬件时禁止继续采样。
+     * @note 阻塞调用；Normal20 下约 2 秒，Duty5 下约 7.3 秒。
+     * @note 仅校准 ADC 本身，不消除传感器或外部放大电路的零点偏置。
+     * @note 使用内部振荡器或 4.096 MHz 外部时钟；非此频率需调整私有等待时间。
+     * @note 修改增益、PGA 旁路或参考源后，应重新调用 Calibrate()。
+     */
     Status Calibrate();
 
-    /** @brief 复位芯片、校验配置、写入并读回寄存器，最后启动转换。 */
+    /** @brief 复位、校验配置并启动转换；模拟输入模式自动完成偏移校准后返回。 */
     Status Init();
 
     /**
@@ -255,7 +266,7 @@ public:
      */
     Status SetVref(float Vref);
 
-    /** @brief 返回最近一次成功采样得到的 24 位有符号原始码。 */
+    /** @brief 返回最近一次有效采样的有符号码；模拟输入已扣除校准偏移。 */
     int32_t GetRawValue() const { return RawValue_; }
 
     /** @brief 返回最近一次模拟输入采样换算出的差分电压，单位 V。 */
@@ -322,6 +333,9 @@ private:
     /** @brief 将 Gain 枚举转换为实际倍率 1、2、4……128。 */
     uint16_t GetGainValue() const;
 
+    /** @brief 按当前工作模式和数据率计算含裕量的单次转换等待时间，单位 ms。 */
+    uint32_t GetConversionDelayMs() const;
+
     // ADS1220 正向满量程对应 2^23 个码，用于双极性 24 位数据换算。
     static constexpr float AdcPositiveScale_ = 8388608.0f;
 
@@ -336,5 +350,5 @@ private:
     Status  LastStatus_    = Status::NotInitialized;
     bool    Initialized_   = false;
     float   GainVoltage_   = 0.0f;
-    int   CodeOffset_ = 0;
+    int32_t CodeOffset_ = 0; ///< 内部短接平均偏移码；复位清零，成功校准后更新。
 };

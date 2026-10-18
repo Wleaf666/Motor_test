@@ -12,27 +12,74 @@ ADS1220::ADS1220(SPI_HandleTypeDef* hspi, const Config& config) : hspi_(hspi), C
 
 ADS1220::Status ADS1220::Calibrate()
 {
-    CodeOffset_           = 0;
-    ADS1220::InputMux cpy = Config_.input;
-    Config_.input         = ADS1220::InputMux::ShortedMidSupply;
-    Configure(Config_);
-    int samples = 200;
-    int sum     = 0;
-    for (int64_t i = 0; i < samples; i++)
+    if (!Initialized_)
     {
-        Update();
-        sum += RawValue_;
+        return LastStatus_ = Status::NotInitialized;
     }
-    CodeOffset_   = sum / samples;
-    Config_.input = cpy;
-    Configure(Config_);
-    return ADS1220::Status::Ok;
+    // 温度和系统监测不经过当前 PGA 信号路径，不能套用模拟输入偏移校准。
+    if (Config_.temperature_sensor || static_cast<uint8_t>(Config_.input) >= 0xC0U)
+    {
+        return LastStatus_ = Status::InvalidArgument;
+    }
+
+    const Config original_config = Config_;
+    const int32_t previous_offset = CodeOffset_;
+    const int32_t previous_raw = RawValue_;
+    const float previous_voltage = Voltage_;
+    const float previous_gain_voltage = GainVoltage_;
+    const float previous_temperature = Temperature_;
+
+    // 按数据手册 8.3.12 将 PGA 两端短接至电源中点，保持原增益和参考源。
+    // 单次转换确保每次累计的都是独立新样本，而非重复读取输出缓冲区。
+    Config_.input = InputMux::ShortedMidSupply;
+    Config_.conversion_mode = ConversionMode::SingleShot;
+    Config_.burn_out_sources = false;
+    CodeOffset_ = 0;
+    Status status = ApplyConfig();
+    constexpr uint16_t sample_count = 32;
+    int64_t sum = 0;
+    for (uint16_t index = 0; index < sample_count && status == Status::Ok; ++index)
+    {
+        status = Start();
+        if (status != Status::Ok)
+        {
+            break;
+        }
+        HAL_Delay(GetConversionDelayMs());
+        status = Update();
+        if (status == Status::Ok)
+        {
+            sum += RawValue_;
+        }
+    }
+
+    // 成功和失败都恢复完整测量配置；临时短接读数不向业务层发布。
+    Config_ = original_config;
+    CodeOffset_ = previous_offset;
+    RawValue_ = previous_raw;
+    Voltage_ = previous_voltage;
+    GainVoltage_ = previous_gain_voltage;
+    Temperature_ = previous_temperature;
+    const Status restore_status = ApplyConfig();
+    if (restore_status != Status::Ok)
+    {
+        // 硬件可能仍停留在短接通道，禁止后续 Update() 假装正常采样。
+        Initialized_ = false;
+        return LastStatus_ = restore_status;
+    }
+    // 等待恢复通道的首个结果，避免紧接着 Update() 又读到短接时的旧结果。
+    HAL_Delay(GetConversionDelayMs());
+    if (status == Status::Ok)
+    {
+        CodeOffset_ = static_cast<int32_t>(sum / sample_count);
+    }
+    return LastStatus_ = status;
 }
 
 ADS1220::Status ADS1220::Init()
 {
-    // 初始化顺序固定为：参数校验 -> 芯片复位 -> 写寄存器 -> 读回校验 -> 启动转换。
-    // 任一步失败都会立即返回，避免业务层使用部分初始化的对象。
+    // 初始化顺序：参数校验 -> 复位 -> 配置校验 -> 模拟输入偏移校准 -> 恢复采样。
+    // 只有包括校准在内的完整流程成功，业务层才可以开始采样。
 
     if (hspi_ == nullptr)
     {
@@ -57,11 +104,20 @@ ADS1220::Status ADS1220::Init()
     // ApplyConfig() 只有在四个寄存器全部写入且读回一致后才返回成功。
 
     LastStatus_ = ApplyConfig();
-    if (LastStatus_ == Status::Ok)
+    if (LastStatus_ != Status::Ok)
     {
-        Initialized_ = true;
+        return LastStatus_;
     }
-    LastStatus_ = Calibrate();
+    Initialized_ = true;
+    // 温度和系统监测模式不使用 PGA 偏移校准。
+    if (!Config_.temperature_sensor && static_cast<uint8_t>(Config_.input) < 0xC0U)
+    {
+        LastStatus_ = Calibrate();
+        if (LastStatus_ != Status::Ok)
+        {
+            Initialized_ = false;
+        }
+    }
     return LastStatus_;
 }
 
@@ -162,6 +218,7 @@ ADS1220::Status ADS1220::Reset()
     {
         HAL_Delay(1);
         Initialized_ = false;
+        CodeOffset_ = 0;
     }
     return LastStatus_;
 }
@@ -405,4 +462,19 @@ uint16_t ADS1220::GetGainValue() const
 {
     // Gain 枚举保存 log2(倍率)，左移即可得到实际倍率且不需要查表。
     return static_cast<uint16_t>(1U << static_cast<uint8_t>(Config_.gain));
+}
+
+uint32_t ADS1220::GetConversionDelayMs() const
+{
+    // 数据率表：正常、占空比、Turbo；假定内部振荡器或 4.096 MHz 外部时钟。
+    // 周期向上取整，再留 10% 时钟裕量和 2 ms 启动时间；不依赖未接出的 DRDY。
+    static constexpr uint32_t periods_us[3][7] = {
+        {50000, 22223, 11112, 5715, 3031, 1667, 1000},
+        {200000, 88889, 44445, 22728, 12122, 6667, 4000},
+        {25000, 11112, 5556, 2858, 1516, 834, 500},
+    };
+    const uint8_t rate = static_cast<uint8_t>(Config_.data_rate);
+    const uint8_t mode = (rate >> 3U) & 0x03U;
+    const uint8_t dr = rate >> 5U;
+    return (periods_us[mode][dr] * 11U + 9999U) / 10000U + 2U;
 }
