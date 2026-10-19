@@ -7,5 +7,6 @@ ioc_file = "Motor_test.ioc"
 [dependencies]
 packages = [
     "libs::PIDMotor",
+    "memory::StaticArena",
     "utils",
 ]

@@ -11,6 +11,7 @@ set(WTR_MANAGED_REPOSITORIES
 
 set(WTR_MANAGED_PACKAGE_DIRS
     Modules/BasicComponents/libs/control/pid_motor
+    Modules/BasicComponents/memory/StaticArena
     Modules/BasicComponents/utils
 )
 
@@ -27,11 +28,13 @@ endforeach()
 
 set(WTR_DIRECT_PACKAGE_TARGETS
     libs::PIDMotor
+    memory::StaticArena
     utils
 )
 
 set(WTR_RESOLVED_PACKAGE_TARGETS
     libs::PIDMotor
+    memory::StaticArena
     utils
     stm32cubemx
 )
