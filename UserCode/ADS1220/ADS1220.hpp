@@ -22,8 +22,8 @@
  * 硬件约束：
  * - SPI 必须配置为模式 1（CPOL = 0，CPHA = 1）。
  * - 当前类不控制 CS 引脚，调用期间 CS 必须由硬件或外部代码保持为有效低电平。
- * - Update() 按数据率等待新的转换结果，不要求业务层自行计算等待周期。
- * - 等待基于 HAL 毫秒时基，支持内部振荡器或 4.096 MHz 外部时钟，不代替 DRDY 在线检测。
+ * - Update() 不等待 ADC 转换；未到就绪时刻立即返回 NotReady，缓存保持不变。
+ * - 就绪判断基于 HAL 毫秒时基，支持内部振荡器或 4.096 MHz 外部时钟，不代替 DRDY 在线检测。
  * - 同一个对象不支持多线程并发调用。
  */
 class ADS1220
@@ -38,7 +38,7 @@ public:
         SpiBusy,               ///< SPI 外设当前忙。
         SpiTimeout,            ///< SPI 发送或接收超时。
         ConfigurationMismatch, ///< 配置寄存器读回值与写入值不一致。
-        NotReady,              ///< 已休眠或单次结果已读取；需要 Start() 启动新转换。
+        NotReady,              ///< 尚未转换完成、已休眠或单次结果已读取。
     };
 
     /**
@@ -235,11 +235,11 @@ public:
     Status Init();
 
     /**
-     * @brief 等待一次新转换、读取并更新缓存；SPI 出错时保留上一次有效结果。
-     * @note 单次模式每个 Start() 只允许一次成功读取；休眠时返回 NotReady。
-     * @note 成功后 HasSample() 为 true；不检测断线或转换器停止，必要时需外接 DRDY。
-     * @note 通过 HAL_Delay() 阻塞等待，不可在中断中调用；HAL 毫秒时基必须已运行。
-     * @note 无 DRDY 时采用带裕量的毫秒等待，实际读取频率低于芯片标称 SPS，尤其高速档。
+     * @brief 非等待式检查新转换；未就绪返回 NotReady，就绪才读 SPI 并更新缓存。
+     * @note 单次模式每个 Start() 只允许一次成功读取；休眠后需 Start() 再启动。
+     * @note NotReady 不改变缓存或 HasSample()；成功读取后 HasSample() 为 true。
+     * @note 不调用 HAL_Delay()，但就绪后仍使用带超时的同步 HAL SPI，并非 DMA 异步接口。
+     * @note 无 DRDY 时采用带裕量的毫秒时基判断；实际读频低于标称 SPS，尤其高速档。
      */
     Status Update();
 
@@ -247,7 +247,7 @@ public:
      * @brief 应用一套完整配置。
      * @note 初始化前只保存配置；运行时写入、校验并启动转换，必要时自动校准。
      * @note 失败后恢复原配置并验证；恢复失败则禁止采样，必须重新 Init()。
-     * @note 配置成功后旧缓存清零，下一次 Update() 等待新配置的有效转换。
+     * @note 配置成功后旧缓存清零；下次有效转换前 Update() 立即返回 NotReady。
      */
     Status Configure(const Config& config);
 
@@ -349,7 +349,7 @@ private:
     /** @brief 按当前工作模式和数据率计算含裕量的单次转换等待时间，单位 ms。 */
     uint32_t GetConversionDelayMs() const;
 
-    /** @brief 按当前转换开始时刻等待新结果，避免配置切换后读取旧缓冲区。 */
+    /** @brief 仅供校准内部等待新结果；正常 Update() 不调用。 */
     void WaitForConversion() const;
 
     /** @brief 清空测量缓存并使其失效。 */

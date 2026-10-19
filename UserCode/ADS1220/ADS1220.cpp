@@ -33,7 +33,7 @@ ADS1220::Status ADS1220::Calibrate()
     const bool previous_has_sample = HasSample_;
 
     // 按数据手册 8.3.12 短接 PGA 两端，保持原增益和参考源。
-    // 使用单次转换和 Update() 的内部等待，每次累计独立的新样本。
+    // 校准流程自身等待转换完成；正常 Update() 只检查就绪，不阻塞等待。
     Config_.input = InputMux::ShortedMidSupply;
     Config_.conversion_mode = ConversionMode::SingleShot;
     Config_.burn_out_sources = false;
@@ -49,6 +49,7 @@ ADS1220::Status ADS1220::Calibrate()
         }
         if (status == Status::Ok)
         {
+            WaitForConversion();
             status = Update();
         }
         if (status == Status::Ok)
@@ -144,9 +145,12 @@ ADS1220::Status ADS1220::Update()
         return LastStatus_ = Status::NotReady;
     }
 
-    // RDATA 只读输出缓冲区，并不等待转换；驱动内部按当前配置等待新结果。
-    // 不足一整个保守周期时等待剩余时间，切换通道/增益后不会读到旧转换。
-    WaitForConversion();
+    // 尚未经过完整保守周期时立即返回；不等待、不访问 SPI、不修改测量缓存。
+    // 无符号差值允许 HAL 毫秒 tick 跨越 UINT32_MAX 回绕。
+    if (HAL_GetTick() - ConversionStartedAt_ < GetConversionDelayMs())
+    {
+        return LastStatus_ = Status::NotReady;
+    }
     LastStatus_ = SendCommand(Cmd::RDATA);
     if (LastStatus_ != Status::Ok)
     {
