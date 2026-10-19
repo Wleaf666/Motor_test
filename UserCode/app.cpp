@@ -3,10 +3,13 @@
 #include "tim.h"
 #include "algorithm"
 #include "spi.h"
+#include "usart.h"
+#include <atomic>
 
 #include "pid_motor.hpp"
 
 #include "ADS1220/ADS1220.hpp"
+#include "HostCommunication/HostCommunication.hpp"
 
 constexpr float V_in        = 24.0;
 constexpr float PWM_CNT_MAX = 3599 * 0.9;
@@ -20,19 +23,19 @@ constexpr float ADC_MAX  = 4095.0f;
 
 uint16_t ADC_Value[2];
 
-float V_target = 8.0;
+// 任务与定时器 ISR 之间使用无锁原子量，不依赖 volatile 进行同步。
+static_assert(std::atomic<float>::is_always_lock_free);
+std::atomic<float> V_target{0.0f};
 
-PIDMotor* V_pid      = nullptr;
-PIDMotor* Torque_pid = nullptr;
-ADS1220*  ADS1220_   = nullptr;
+PIDMotor* V_pid    = nullptr;
+ADS1220* ADS1220_  = nullptr;
+HostCommunication Host_(&huart3, MAX_VOUT);
 
-float Torque_feedback  = 0.0f;
-float Torque_Vfeedback = 0.0f;
-float Torque_target    = 4.0f;
+std::atomic<float> Torque_feedback{0.0f};
+std::atomic<float> Torque_Vfeedback{0.0f};
 
 
 PIDMotor::Config V_cfg = { .Kp = 5000.0, .Ki = 20.0, .Kd = 0.0, .abs_output_max = PWM_CNT_MAX };
-PIDMotor::Config Torque_cfg = { .Kp = 0.1, .Ki = 0.0, .Kd = 0.0, .abs_output_max = MAX_VOUT };
 
 void ADC_init()
 {
@@ -42,12 +45,11 @@ void ADC_init()
 
 void PID_init()
 {
-    V_pid      = new PIDMotor(V_cfg);
-    Torque_pid = new PIDMotor(Torque_cfg);
+    V_pid = new PIDMotor(V_cfg);
 }
 
 float adc_V;
-float V_feedback;
+std::atomic<float> V_feedback{0.0f};
 float output;
 float pwm_output;
 
@@ -55,8 +57,9 @@ void TIM2_Vout_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
     int32_t raw_V = ADC_Value[1];
     adc_V         = raw_V / ADC_MAX * Vref;
-    V_feedback    = adc_V * (Rbottom + Rtop) / Rbottom;
-    pwm_output    = V_pid->calc(V_target, V_feedback);
+    const float voltage = adc_V * (Rbottom + Rtop) / Rbottom;
+    V_feedback.store(voltage, std::memory_order_relaxed);
+    pwm_output = V_pid->calc(V_target.load(std::memory_order_relaxed), voltage);
     pwm_output    = std::clamp(pwm_output, 0.0f, PWM_CNT_MAX);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, static_cast<uint32_t>(pwm_output));
 }
@@ -66,9 +69,9 @@ constexpr float TorqueRange = 20.0f;
 
 void TIM3_Torque_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
-    Torque_feedback = Torque_Vfeedback / Vrange * TorqueRange;
-    // V_target        = Torque_pid->calc(Torque_target, Torque_feedback);
-    // V_target        = std::clamp(V_target, 0.0f, MAX_VOUT);
+    // 只换算测量值，不通过扭矩环修改上位机指定的 V_target。
+    Torque_feedback.store(Torque_Vfeedback.load(std::memory_order_relaxed) / Vrange * TorqueRange,
+                          std::memory_order_relaxed);
 }
 
 void TIM_init()
@@ -139,14 +142,42 @@ float getBias()
 
 void Task_get_torque(void* argument)
 {
-    TorqueV_feedback_bias = getBias();
     for (;;)
     {
         Vref_5V = ADC_Value[0] / ADC_MAX * Vref;
         if (ADS1220_->Update() == ADS1220::Status::Ok)
         {
-            Torque_Vfeedback = ADS1220_->GetGainVoltage() - TorqueV_feedback_bias;
+            Torque_Vfeedback.store(ADS1220_->GetGainVoltage() - TorqueV_feedback_bias,
+                                   std::memory_order_relaxed);
         }
+        osDelay(1);
+    }
+}
+
+HAL_StatusTypeDef Host_tx_status = HAL_OK;
+
+void Task_host_communication(void* argument)
+{
+    const uint32_t tick_frequency = osKernelGetTickFreq();
+    const uint32_t poll_interval = (tick_frequency + 999U) / 1000U;
+    const uint32_t feedback_interval = (tick_frequency * 50U + 999U) / 1000U;
+    uint32_t last_feedback = osKernelGetTickCount();
+    for (;;)
+    {
+        float target;
+        if (Host_.TakeTarget(target))
+        {
+            V_target.store(target, std::memory_order_relaxed);
+        }
+        const uint32_t now = osKernelGetTickCount();
+        if (now - last_feedback >= feedback_interval)
+        {
+            last_feedback = now;
+            // 每周期只发最新测量值；HAL_BUSY 时跳过，不覆盖仍由 DMA 使用的缓冲。
+            Host_tx_status = Host_.SendFeedback(V_feedback.load(std::memory_order_relaxed),
+                                               Torque_feedback.load(std::memory_order_relaxed));
+        }
+        osDelay(poll_interval);
     }
 }
 
@@ -159,11 +190,19 @@ extern "C" void Init(void* argument)
         return;
     }
     ADC_init();
+    // 无载归零先完成，再启动 PWM 和主机通信，避免把工作负载当成零点。
+    TorqueV_feedback_bias = getBias();
+    if (!Host_.Init())
+    {
+        osThreadExit();
+        return;
+    }
 
     PID_init();
     TIM_init();
 
     osThreadNew(Task_get_torque, nullptr, nullptr);
+    osThreadNew(Task_host_communication, nullptr, nullptr);
 
     /* 初始化完成后退出线程 */
     osThreadExit();
