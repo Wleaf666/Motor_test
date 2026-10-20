@@ -124,7 +124,7 @@ float getBias()
     constexpr uint32_t zero_samples    = 32;
 
     // 上电无负载稳定 3 秒后采集传感器零点，不使用尚未 Update() 的初始缓存。
-    osDelay(tick_frequency * 3U);
+    osDelay(tick_frequency );
     float zero_sum = 0.0f;
     for (uint32_t index = 0; index < zero_samples; ++index)
     {
