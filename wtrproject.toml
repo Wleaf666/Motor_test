@@ -6,6 +6,9 @@ ioc_file = "Motor_test.ioc"
 
 [dependencies]
 packages = [
+    "libs::CRC",
     "libs::PIDMotor",
+    "memory::StaticArena",
+    "protocol::UartRxSync",
     "utils",
 ]
