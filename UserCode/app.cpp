@@ -140,10 +140,21 @@ float getBias()
     return zero_sum / static_cast<float>(zero_samples);
 }
 
+void Host_update()
+{
+    float target;
+    if (Host_.TakeTarget(target))
+    {
+        V_target.store(target, std::memory_order_relaxed);
+    }
+}
+
 void Task_get_torque(void* argument)
 {
     for (;;)
     {
+        // 复用现有 1 ms 任务消费命令，不增加接收线程或发送调度计数器。
+        Host_update();
         Vref_5V = ADC_Value[0] / ADC_MAX * Vref;
         if (ADS1220_->Update() == ADS1220::Status::Ok)
         {
@@ -158,26 +169,13 @@ HAL_StatusTypeDef Host_tx_status = HAL_OK;
 
 void Task_host_communication(void* argument)
 {
-    const uint32_t tick_frequency = osKernelGetTickFreq();
-    const uint32_t poll_interval = (tick_frequency + 999U) / 1000U;
-    const uint32_t feedback_interval = (tick_frequency * 50U + 999U) / 1000U;
-    uint32_t last_feedback = osKernelGetTickCount();
     for (;;)
     {
-        float target;
-        if (Host_.TakeTarget(target))
-        {
-            V_target.store(target, std::memory_order_relaxed);
-        }
-        const uint32_t now = osKernelGetTickCount();
-        if (now - last_feedback >= feedback_interval)
-        {
-            last_feedback = now;
-            // 每周期只发最新测量值；HAL_BUSY 时跳过，不覆盖仍由 DMA 使用的缓冲。
-            Host_tx_status = Host_.SendFeedback(V_feedback.load(std::memory_order_relaxed),
-                                               Torque_feedback.load(std::memory_order_relaxed));
-        }
-        osDelay(poll_interval);
+        // 本工程 FreeRTOS 时基为 1 kHz，50 tick 对应 50 ms。
+        osDelay(50);
+        // 每 50 ms 发送最新测量值；DMA 忙则跳过，不排队、不覆盖发送缓冲。
+        Host_tx_status = Host_.SendFeedback(V_feedback.load(std::memory_order_relaxed),
+                                           Torque_feedback.load(std::memory_order_relaxed));
     }
 }
 

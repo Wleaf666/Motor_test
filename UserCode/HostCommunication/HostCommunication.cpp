@@ -9,50 +9,15 @@ HostCommunication::HostCommunication(UART_HandleTypeDef* huart, float max_voltag
 
 bool HostCommunication::Init()
 {
-    auto* uart = huart();
-    if (Initialized_ || (Instance_ != nullptr && Instance_ != this) || uart == nullptr ||
-        uart->hdmarx == nullptr || uart->hdmatx == nullptr || !std::isfinite(MaxVoltage_) ||
-        MaxVoltage_ <= 0.0f || uart->hdmarx->Init.Mode != DMA_CIRCULAR ||
-        uart->hdmatx->Init.Mode != DMA_NORMAL ||
-        uart->hdmarx->Init.Direction != DMA_PERIPH_TO_MEMORY ||
-        uart->hdmatx->Init.Direction != DMA_MEMORY_TO_PERIPH ||
-        uart->hdmarx->Init.MemDataAlignment != DMA_MDATAALIGN_BYTE ||
-        uart->hdmatx->Init.MemDataAlignment != DMA_MDATAALIGN_BYTE ||
-        uart->hdmarx->Init.PeriphDataAlignment != DMA_PDATAALIGN_BYTE ||
-        uart->hdmatx->Init.PeriphDataAlignment != DMA_PDATAALIGN_BYTE ||
-        uart->hdmarx->Init.MemInc != DMA_MINC_ENABLE ||
-        uart->hdmatx->Init.MemInc != DMA_MINC_ENABLE ||
-        uart->hdmarx->Init.PeriphInc != DMA_PINC_DISABLE ||
-        uart->hdmatx->Init.PeriphInc != DMA_PINC_DISABLE)
+    if (Initialized_ || (Instance_ != nullptr && Instance_ != this) || !CheckConfig())
     {
         return false;
     }
 
     Instance_ = this;
-    const auto rx_status = HAL_UART_RegisterCallback(uart, HAL_UART_RX_COMPLETE_CB_ID,
-        [](UART_HandleTypeDef* handle) {
-            if (Instance_ != nullptr && Instance_->huart() == handle)
-            {
-                Instance_->receiveCallback();
-            }
-        });
-    const auto tx_status = HAL_UART_RegisterCallback(uart, HAL_UART_TX_COMPLETE_CB_ID,
-        [](UART_HandleTypeDef* handle) {
-            if (Instance_ != nullptr && Instance_->huart() == handle)
-            {
-                Instance_->TxBusy_.store(false, std::memory_order_release);
-            }
-        });
-    const auto error_status = HAL_UART_RegisterCallback(uart, HAL_UART_ERROR_CB_ID,
-        [](UART_HandleTypeDef* handle) {
-            if (Instance_ != nullptr && Instance_->huart() == handle)
-            {
-                Instance_->ErrorCallback();
-            }
-        });
-    if (rx_status != HAL_OK || tx_status != HAL_OK || error_status != HAL_OK || !startReceive())
+    if (!RegisterCallbacks() || !startReceive())
     {
-        HAL_UART_AbortReceive(uart);
+        HAL_UART_AbortReceive(huart());
         Instance_ = nullptr;
         return false;
     }
@@ -133,4 +98,61 @@ void HostCommunication::ErrorCallback()
         TxBusy_.store(false, std::memory_order_release);
     }
     errorHandler(); // 复用接收器的 RX 错误恢复，不干预正常 TX。
+}
+
+bool HostCommunication::CheckConfig() const
+{
+    const auto* uart = huart();
+    if (uart == nullptr || uart->hdmarx == nullptr || uart->hdmatx == nullptr ||
+        !std::isfinite(MaxVoltage_) || MaxVoltage_ <= 0.0f)
+    {
+        return false;
+    }
+
+    const auto& rx = uart->hdmarx->Init;
+    const auto& tx = uart->hdmatx->Init;
+    // CubeMX 负责配置；这里只确认当前协议所需的 RX 循环 / TX 单次字节传输。
+    return rx.Mode == DMA_CIRCULAR && tx.Mode == DMA_NORMAL &&
+           rx.Direction == DMA_PERIPH_TO_MEMORY && tx.Direction == DMA_MEMORY_TO_PERIPH &&
+           rx.MemDataAlignment == DMA_MDATAALIGN_BYTE && tx.MemDataAlignment == DMA_MDATAALIGN_BYTE &&
+           rx.PeriphDataAlignment == DMA_PDATAALIGN_BYTE && tx.PeriphDataAlignment == DMA_PDATAALIGN_BYTE &&
+           rx.MemInc == DMA_MINC_ENABLE && tx.MemInc == DMA_MINC_ENABLE &&
+           rx.PeriphInc == DMA_PINC_DISABLE && tx.PeriphInc == DMA_PINC_DISABLE;
+}
+
+bool HostCommunication::RegisterCallbacks()
+{
+    auto* uart = huart();
+    return HAL_UART_RegisterCallback(uart, HAL_UART_RX_COMPLETE_CB_ID, RxCompleteCallback) == HAL_OK &&
+           HAL_UART_RegisterCallback(uart, HAL_UART_TX_COMPLETE_CB_ID, TxCompleteCallback) == HAL_OK &&
+           HAL_UART_RegisterCallback(uart, HAL_UART_ERROR_CB_ID, UartErrorCallback) == HAL_OK;
+}
+
+HostCommunication* HostCommunication::FromHandle(UART_HandleTypeDef* uart)
+{
+    return Instance_ != nullptr && Instance_->huart() == uart ? Instance_ : nullptr;
+}
+
+void HostCommunication::RxCompleteCallback(UART_HandleTypeDef* uart)
+{
+    if (auto* host = FromHandle(uart))
+    {
+        host->receiveCallback();
+    }
+}
+
+void HostCommunication::TxCompleteCallback(UART_HandleTypeDef* uart)
+{
+    if (auto* host = FromHandle(uart))
+    {
+        host->TxBusy_.store(false, std::memory_order_release);
+    }
+}
+
+void HostCommunication::UartErrorCallback(UART_HandleTypeDef* uart)
+{
+    if (auto* host = FromHandle(uart))
+    {
+        host->ErrorCallback();
+    }
 }

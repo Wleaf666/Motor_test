@@ -8,8 +8,9 @@
 /**
  * @brief 固定帧上位机通信，接收电压目标，DMA 发送电压/扭矩测量值。
  *
- * 一个静态对象独占 USART 及 RX/TX 回调。Init、TakeTarget、SendFeedback 由单个任务调用，
- * ISR 只验证帧和发布最新目标，不直接调用 PID。不使用堆内存。
+ * 一个静态对象独占 USART 及 RX/TX 回调，Init 在启动任务前调用。
+ * TakeTarget 由接收任务消费，SendFeedback 由单个发送任务调用。
+ * ISR 只验证帧和发布最新目标，不直接调用 PID；不分配堆内存。
  */
 class HostCommunication final : private protocol::UartRxSync<1, host_protocol::FrameSize, true>
 {
@@ -25,12 +26,21 @@ public:
 
 private:
     using Receiver = protocol::UartRxSync<1, host_protocol::FrameSize, true>;
+
+    bool CheckConfig() const;
+    bool RegisterCallbacks();
+    static HostCommunication* FromHandle(UART_HandleTypeDef* huart);
+    static void RxCompleteCallback(UART_HandleTypeDef* huart);
+    static void TxCompleteCallback(UART_HandleTypeDef* huart);
+    static void UartErrorCallback(UART_HandleTypeDef* huart);
+
     const std::array<uint8_t, 1>& header() const override;
     bool decode(const uint8_t* data) override;
     void ErrorCallback();
 
     static_assert(std::atomic<uint32_t>::is_always_lock_free,
                   "ISR target mailbox requires lock-free 32-bit atomic operations");
+    // 0xFFFFFFFF 为 NaN 位模式，合法有限电压不会与“无待处理目标”冲突。
     static constexpr uint32_t NoTarget = 0xFFFFFFFFU;
     static HostCommunication* Instance_;
 
