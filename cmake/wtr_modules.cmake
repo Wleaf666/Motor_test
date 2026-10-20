@@ -10,8 +10,12 @@ set(WTR_MANAGED_REPOSITORIES
 )
 
 set(WTR_MANAGED_PACKAGE_DIRS
+    Modules/BasicComponents/libs/utils/crc
     Modules/BasicComponents/libs/control/pid_motor
     Modules/BasicComponents/memory/StaticArena
+    Modules/BasicComponents/services/watchdog
+    Modules/BasicComponents/memory/DMABuffer
+    Modules/BasicComponents/protocol/UartRxSync
     Modules/BasicComponents/utils
 )
 
@@ -27,14 +31,20 @@ foreach(_wtr_package_dir IN LISTS WTR_MANAGED_PACKAGE_DIRS)
 endforeach()
 
 set(WTR_DIRECT_PACKAGE_TARGETS
+    libs::CRC
     libs::PIDMotor
     memory::StaticArena
+    protocol::UartRxSync
     utils
 )
 
 set(WTR_RESOLVED_PACKAGE_TARGETS
+    libs::CRC
     libs::PIDMotor
     memory::StaticArena
+    services::Watchdog
+    memory::DMABuffer
+    protocol::UartRxSync
     utils
     stm32cubemx
 )
