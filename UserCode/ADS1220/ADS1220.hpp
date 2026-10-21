@@ -227,7 +227,8 @@ public:
      * @note 阻塞调用；Normal20 下约 2 秒，Duty5 下约 7.3 秒。
      * @note 仅校准 ADC 本身，不消除传感器或外部放大电路的零点偏置。
      * @note 使用内部振荡器或 4.096 MHz 外部时钟；非此频率需调整私有等待时间。
-     * @note Configure() 改变增益、PGA 旁路、数据率或参考源/电压后会自动重新校准。
+     * @note Configure() 改变增益、PGA 旁路、数据率或硬件参考源后会自动重新校准。
+     * @note 仅更新 reference_voltage 软件换算系数不会重新校准，偏移码保持不变。
      */
     Status Calibrate();
 
@@ -265,7 +266,7 @@ public:
 
     /**
      * @brief 修改外部/电源参考的实际电压（V），必须为正有限数。
-     * @note 不改变参考源选择；通过 Configure() 统一应用并处理校准和缓存失效。
+     * @note 不改变参考源选择、不触发偏移校准；仍通过 Configure() 应用并使缓存失效。
      */
     Status SetVref(float Vref);
 

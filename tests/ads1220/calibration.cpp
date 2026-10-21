@@ -385,6 +385,52 @@ void TestConfigurationContract()
     Require(adc.Configure(config) == ADS1220::Status::InvalidArgument, "invalid single-ended PGA config rejected");
     std::puts("PASS pre-init configuration, finite reference validation and scaling");
 }
+
+void TestSoftwareReferenceUpdate()
+{
+    SPI_HandleTypeDef spi;
+    for (const auto rate : {ADS1220::DataRate::Normal20, ADS1220::DataRate::Duty5})
+    {
+        for (const auto reference : {ADS1220::VoltageReference::ExternalRef0,
+                                     ADS1220::VoltageReference::Internal2048})
+        {
+            chip = {};
+            auto config = MakeConfig();
+            config.data_rate = rate;
+            config.voltage_reference = reference;
+            ADS1220 adc(&spi, config);
+            Require(adc.Init() == ADS1220::Status::Ok && ReadNext(adc) == ADS1220::Status::Ok,
+                    "software reference setup includes valid ADC offset calibration");
+            const int32_t corrected_code = adc.GetRawValue();
+            const unsigned calibration_reads = chip.short_reads;
+
+            const uint64_t before_setter = chip.now;
+            Require(adc.SetVref(2.5f) == ADS1220::Status::Ok, "software reference setter succeeds");
+            Require(chip.now == before_setter && chip.short_reads == calibration_reads,
+                    "SetVref does not wait for calibration or acquire shorted samples");
+            Require(adc.GetConfig().reference_voltage == 2.5f, "new software reference saved");
+            const float setter_reference = reference == ADS1220::VoltageReference::Internal2048
+                                               ? 2.048f : 2.5f;
+            Require(ReadNext(adc) == ADS1220::Status::Ok && adc.GetRawValue() == corrected_code &&
+                    Near(adc.GetVoltage(), ExpectedInput(setter_reference)),
+                    "setter preserves offset code and changes only applicable voltage scale");
+
+            config = adc.GetConfig();
+            config.reference_voltage = 4.75f;
+            const uint64_t before_configure = chip.now;
+            Require(adc.Configure(config) == ADS1220::Status::Ok, "direct software reference update succeeds");
+            Require(chip.now == before_configure && chip.short_reads == calibration_reads,
+                    "Configure reference-only change does not recalibrate at either data rate");
+            const float configured_reference = reference == ADS1220::VoltageReference::Internal2048
+                                                   ? 2.048f : 4.75f;
+            Require(ReadNext(adc) == ADS1220::Status::Ok && adc.GetRawValue() == corrected_code &&
+                    Near(adc.GetVoltage(), ExpectedInput(configured_reference)),
+                    "direct update retains offset and internal reference ignores software coefficient");
+        }
+    }
+    std::puts("PASS reference-only updates: no calibration delay, preserved offset, Normal20/Duty5, external/internal reference");
+}
+
 } // namespace
 
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef*, uint8_t* data, uint16_t size, uint32_t)
@@ -501,5 +547,6 @@ int main()
     TestMonitorAndTemperature();
     TestPowerAndTiming();
     TestConfigurationContract();
+    TestSoftwareReferenceUpdate();
     std::puts("All ADS1220 regression scenarios passed.");
 }
