@@ -6,6 +6,7 @@ ioc_file = "Motor_test.ioc"
 
 [dependencies]
 packages = [
+    "Math::EKF",
     "libs::CRC",
     "libs::PIDMotor",
     "memory::StaticArena",

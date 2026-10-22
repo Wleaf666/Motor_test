@@ -17,6 +17,8 @@ set(WTR_MANAGED_PACKAGE_DIRS
     Modules/BasicComponents/memory/DMABuffer
     Modules/BasicComponents/protocol/UartRxSync
     Modules/BasicComponents/utils
+    Modules/BasicComponents/libs/math/LinearAlgebra
+    Modules/BasicComponents/libs/math/EKF
 )
 
 foreach(_wtr_package_dir IN LISTS WTR_MANAGED_PACKAGE_DIRS)
@@ -36,6 +38,7 @@ set(WTR_DIRECT_PACKAGE_TARGETS
     memory::StaticArena
     protocol::UartRxSync
     utils
+    Math::EKF
 )
 
 set(WTR_RESOLVED_PACKAGE_TARGETS
@@ -46,6 +49,8 @@ set(WTR_RESOLVED_PACKAGE_TARGETS
     memory::DMABuffer
     protocol::UartRxSync
     utils
+    Math::LinearAlgebra
+    Math::EKF
     stm32cubemx
 )
 

@@ -95,7 +95,7 @@ git submodule update --init --recursive
 cpkg sync
 ```
 
-BasicComponents 子模块地址使用 GitHub SSH，首次获取需要相应的 SSH 访问权限。依赖包含 PIDMotor、CRC、StaticArena、UartRxSync 和 utils；Watchdog、DMABuffer 由组件依赖引入。
+BasicComponents 子模块地址使用 GitHub SSH，首次获取需要相应的 SSH 访问权限。依赖包含 PIDMotor、CRC、StaticArena、UartRxSync、Math::EKF 和 utils；Watchdog、DMABuffer、Math::LinearAlgebra 由组件依赖引入。
 
 `cmake/wtr_modules.cmake` 和组件 `CMakeLists.txt` 由 cpkg 管理，不要手工维护另一套组件链接规则。
 
