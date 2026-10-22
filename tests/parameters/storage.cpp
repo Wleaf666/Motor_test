@@ -16,9 +16,17 @@ using Storage = torque::ParameterStorage;
 using Status = Storage::Status;
 constexpr unsigned RegionOffset = 124U * 1024U;
 constexpr unsigned RegionSize = 4096U;
-const torque::Parameters A{1.0f, 0.1f, 0.01f, 2.0f};
-const torque::Parameters B{2.0f, 0.2f, 0.02f, 3.0f};
-const torque::Parameters C{3.0f, 0.3f, 0.03f, 4.0f};
+constexpr unsigned RecordSize = 48U;
+constexpr unsigned PayloadEnd = 40U;
+constexpr unsigned RecordWords = RecordSize / sizeof(uint64_t);
+const torque::Parameters A{1.0f, 0.1f, 0.01f, 0.02f, 0.3f, 2.0f};
+const torque::Parameters B{2.0f, 0.2f, 0.02f, 0.04f, 0.5f, 3.0f};
+const torque::Parameters C{3.0f, 0.3f, 0.03f, 0.06f, 0.7f, 4.0f};
+using ParameterField = float torque::Parameters::*;
+constexpr std::array<ParameterField, 6> Fields{
+    &torque::Parameters::kp, &torque::Parameters::ki, &torque::Parameters::kd,
+    &torque::Parameters::process_noise, &torque::Parameters::measurement_noise,
+    &torque::Parameters::torque_limit};
 bool locked;
 bool fail_unlock;
 bool fail_erase;
@@ -54,7 +62,9 @@ void Reset()
 bool Equal(const torque::Parameters& left, const torque::Parameters& right)
 {
     return left.kp == right.kp && left.ki == right.ki && left.kd == right.kd &&
-           left.cutoff_hz == right.cutoff_hz;
+           left.process_noise == right.process_noise &&
+           left.measurement_noise == right.measurement_noise &&
+           left.torque_limit == right.torque_limit;
 }
 
 void ExpectLoaded(const torque::Parameters& expected)
@@ -88,7 +98,7 @@ void TestRoundTripAndFallback()
     assert(locked);
 
     // Every bit in the latest record is covered by format, CRC or commit checks.
-    for (unsigned byte = 0; byte < 40; ++byte)
+    for (unsigned byte = 0; byte < RecordSize; ++byte)
     {
         for (unsigned bit = 0; bit < 8; ++bit)
         {
@@ -108,25 +118,23 @@ void TestRejectedSavesPreserveParameters()
     assert(storage.Save(B, false) == Status::OutputActive);
     const float invalid[] = {-1.0f, std::numeric_limits<float>::infinity(),
                              std::numeric_limits<float>::quiet_NaN()};
-    for (unsigned field = 0; field < 4; ++field)
+    for (auto field : Fields)
     {
         for (float value : invalid)
         {
             auto parameters = B;
-            switch (field)
-            {
-            case 0: parameters.kp = value; break;
-            case 1: parameters.ki = value; break;
-            case 2: parameters.kd = value; break;
-            default: parameters.cutoff_hz = value; break;
-            }
+            parameters.*field = value;
             assert(storage.Save(parameters, true) == Status::InvalidParameters);
             ExpectLoaded(A);
         }
     }
-    auto zero_cutoff = B;
-    zero_cutoff.cutoff_hz = 0.0f;
-    assert(storage.Save(zero_cutoff, true) == Status::InvalidParameters);
+    for (unsigned field = 4; field < Fields.size(); ++field)
+    {
+        auto parameters = B;
+        parameters.*Fields[field] = 0.0f;
+        assert(storage.Save(parameters, true) == Status::InvalidParameters);
+        ExpectLoaded(A);
+    }
     const Storage invalid_layouts[] = {
         Storage(reinterpret_cast<std::uintptr_t>(TestFlash + RegionOffset + 8U), RegionSize),
         Storage(reinterpret_cast<std::uintptr_t>(TestFlash + RegionOffset), 2048U),
@@ -145,12 +153,12 @@ void TestInterruptedWrites()
 {
     // Interrupt every aligned program operation after 0..7 bytes. The last fully
     // committed page must remain loadable, even when reusing a previously valid page.
-    for (int word = 0; word < 5; ++word)
+    for (unsigned word = 0; word < RecordWords; ++word)
     {
         for (unsigned bytes = 0; bytes < 8; ++bytes)
         {
             SeedTwoSaves();
-            cut_word = word;
+            cut_word = static_cast<int>(word);
             cut_bytes = bytes;
             assert(MakeStorage().Save(C, true) == Status::ProgramFailed);
             assert(locked);
@@ -189,19 +197,104 @@ void TestHalFailures()
     ExpectLoaded(C);
 }
 
+void Write32(uint8_t* data, uint32_t value)
+{
+    for (unsigned byte = 0; byte < 4; ++byte)
+    {
+        data[byte] = static_cast<uint8_t>(value >> (8U * byte));
+    }
+}
+
+void RewriteChecksum(uint8_t* record, unsigned payload_end = PayloadEnd)
+{
+    using Crc = crc::CRCX<16, 0x1021, 0xFFFF, false, false, 0x0000>;
+    const uint32_t crc = Crc::calc(record, payload_end);
+    Write32(record + payload_end, crc | ((crc ^ 0xFFFFU) << 16U));
+}
+
 void RewriteGeneration(unsigned slot, uint32_t generation)
 {
     uint8_t* record = TestFlash + RegionOffset + slot * FLASH_PAGE_SIZE;
-    for (unsigned byte = 0; byte < 4; ++byte)
+    Write32(record + 8U, generation);
+    RewriteChecksum(record);
+}
+
+void TestRecordLayoutAndChecksumBounds()
+{
+    Reset();
+    assert(MakeStorage().Save(A, true) == Status::Ok);
+    assert(program_word == RecordWords && locked);
+    const uint8_t* record = TestFlash + RegionOffset;
+    assert(record[4] == 2U && record[5] == 0U && record[6] == 0U && record[7] == 0U);
+    assert(record[12] == 24U && record[13] == 0U && record[14] == 0U && record[15] == 0U);
+    for (unsigned field = 0; field < Fields.size(); ++field)
     {
-        record[8U + byte] = static_cast<uint8_t>(generation >> (8U * byte));
+        float restored;
+        std::memcpy(&restored, record + 16U + field * sizeof(float), sizeof(restored));
+        assert(restored == A.*Fields[field]);
     }
-    using Crc = crc::CRCX<16, 0x1021, 0xFFFF, false, false, 0x0000>;
-    const uint32_t crc = Crc::calc(record, 32);
-    const uint32_t checksum = crc | ((crc ^ 0xFFFFU) << 16U);
-    for (unsigned byte = 0; byte < 4; ++byte)
+    for (unsigned byte = RecordSize; byte < FLASH_PAGE_SIZE; ++byte)
     {
-        record[32U + byte] = static_cast<uint8_t>(checksum >> (8U * byte));
+        assert(record[byte] == 0xFFU);
+    }
+    // Neither page padding nor unrelated Flash bytes belong to the record CRC.
+    TestFlash[RegionOffset + RecordSize] = 0;
+    TestFlash[RegionOffset + FLASH_PAGE_SIZE - 1U] = 0;
+    TestFlash[RegionOffset - 1U] = 0;
+    ExpectLoaded(A);
+}
+
+void TestObsoleteRecordsRejected()
+{
+    Reset();
+    uint8_t* record = TestFlash + RegionOffset;
+    Write32(record, 0x51524F54U);
+    Write32(record + 4U, 1U);
+    Write32(record + 8U, 100U);
+    Write32(record + 12U, 16U);
+    const std::array<float, 4> old_parameters{A.kp, A.ki, A.kd, 2.0f};
+    std::memcpy(record + 16U, old_parameters.data(), sizeof(old_parameters));
+    RewriteChecksum(record, 32U);
+    Write32(record + 36U, 0x44455653U);
+    auto loaded = B;
+    assert(MakeStorage().Load(loaded) == Status::NotFound);
+    assert(Equal(loaded, B));
+    // A valid old record cannot displace a current record, even with a higher generation.
+    std::memcpy(record + FLASH_PAGE_SIZE, record, 40U);
+    assert(MakeStorage().Save(C, true) == Status::Ok);
+    ExpectLoaded(C);
+    // Reject version 1 even when all other version-2 fields and CRC are valid.
+    Write32(record + 4U, 1U);
+    RewriteChecksum(record);
+    loaded = A;
+    assert(MakeStorage().Load(loaded) == Status::NotFound);
+    assert(Equal(loaded, A));
+}
+
+void TestNumericBoundaries()
+{
+    for (unsigned field = 0; field < Fields.size(); ++field)
+    {
+        Reset();
+        auto parameters = A;
+        parameters.*Fields[field] = field < 4U ? 0.0f : std::numeric_limits<float>::min();
+        assert(MakeStorage().Save(parameters, true) == Status::Ok);
+        ExpectLoaded(parameters);
+    }
+    // A correct CRC does not make numerically invalid persisted parameters usable.
+    const float invalid[] = {-1.0f, std::numeric_limits<float>::infinity(),
+                             std::numeric_limits<float>::quiet_NaN(), 0.0f};
+    for (unsigned field = 0; field < Fields.size(); ++field)
+    {
+        for (float value : invalid)
+        {
+            if (field < 4U && value == 0.0f) continue;
+            SeedTwoSaves();
+            uint8_t* record = TestFlash + RegionOffset + FLASH_PAGE_SIZE;
+            std::memcpy(record + 16U + field * sizeof(float), &value, sizeof(value));
+            RewriteChecksum(record);
+            ExpectLoaded(A);
+        }
     }
 }
 
@@ -258,7 +351,7 @@ HAL_StatusTypeDef HAL_FLASH_Program(uint32_t type, uint32_t address, uint64_t da
         assert(TestFlash[offset + byte] == 0xFF);
         TestFlash[offset + byte] = static_cast<uint8_t>(data >> (8U * byte));
     }
-    if (corrupt_write && program_word == 5)
+    if (corrupt_write && program_word == RecordWords)
     {
         TestFlash[offset - 16U] ^= 1U;
     }
@@ -272,5 +365,8 @@ int main()
     TestInterruptedWrites();
     TestHalFailures();
     TestGenerationWraparound();
+    TestRecordLayoutAndChecksumBounds();
+    TestObsoleteRecordsRejected();
+    TestNumericBoundaries();
     std::puts("parameter storage regression scenarios passed");
 }

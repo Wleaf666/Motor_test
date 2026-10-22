@@ -20,7 +20,7 @@
 | `UserCode/app.cpp` | 启动流程、电压 PID、扭矩采样和通信任务 |
 | `UserCode/ADS1220/` | 外部 ADC 驱动及使用案例 |
 | `UserCode/HostCommunication/` | 上位机协议、CRC 校验和 UART DMA 收发 |
-| `UserCode/Parameters/` | 扭矩 PID 与低通截止频率参数的双页 Flash 存储接口 |
+| `UserCode/Parameters/` | 扭矩 PID、卡尔曼 Q/R 与目标上限的双页 Flash 存储接口 |
 | `UserCode/arena.cpp` | 全局 C++ `new` 使用的 4 KB 静态线性分配区，单块内存不回收 |
 | `Modules/BasicComponents/` | Git 子模块，由 cpkg 管理组件依赖 |
 | `Drivers/`、`Middlewares/` | STM32 HAL、CMSIS、FreeRTOS |
@@ -139,9 +139,9 @@ cmake --build --preset Debug
 
 `STM32G431xx_FLASH.ld` 将程序 Flash 限制为 124 KB，末尾 `0x0801F000～0x0801FFFF` 的两个 2 KB 页预留给参数，不放入固件加载段。链接符号 `__torque_parameters_start` 和 `__torque_parameters_size` 分别表示区域起始地址和大小。
 
-`torque::ParameterStorage` 保存 `Kp/Ki/Kd` 和低通截止频率（Hz），不保存运行目标。调用方传入上述链接区域；存储实现还会核对区域确为芯片 Flash 的末尾两页。两页交替写入，CRC-16/CCITT-FALSE 校验记录，最后写提交标记，读回比对后返回结果。加载选择最新有效记录，损坏或未完成的新记录不会覆盖上一份有效参数；没有有效记录时返回 `NotFound`，不伪造默认参数。
+`torque::ParameterStorage` 保存六个参数：`Kp/Ki/Kd/Q/R/torque_limit`，不保存运行目标和使能状态。布局版本为 2，旧截止频率布局不兼容。调用方传入上述链接区域；存储实现还会核对区域确为芯片 Flash 的末尾两页。两页交替写入，CRC-16/CCITT-FALSE 校验记录，最后写提交标记，读回比对后返回结果。加载选择最新有效记录，损坏或未完成的新记录不会覆盖上一份有效参数；没有有效记录时返回 `NotFound`，由应用选择明确的默认参数。
 
-保存是同步操作，必须由单个任务独占 Flash。调用方必须先实际停止输出，并禁止其他路径在保存期间重新启动，才能传入 `output_stopped=true`；零目标本身不是输出已停止的证明。传入 false 时不会擦写。擦除、编程、读回和重新加锁失败均有独立状态；保存失败后不能假定 Flash 已重新锁定或输出可以恢复。存储层只检查数值有限、PID 增益非负及截止频率大于零，应用仍须按实际采样率检查截止频率及其他控制边界。
+保存是同步操作，必须由单个任务独占 Flash。调用方必须先实际停止输出，并禁止其他路径在保存期间重新启动，才能传入 `output_stopped=true`；零目标本身不是输出已停止的证明。传入 false 时不会擦写。擦除、编程、读回和重新加锁失败均有独立状态；保存失败后不能假定 Flash 已重新锁定。存储层要求所有参数有限，PID 增益和 Q 非负，R 和目标上限大于零；这些数值检查不构成机械安全边界。
 
 这些恢复保证针对可读的有效 Flash 记录，不代表电源异常期间的硬件可靠性认证。主机测试未模拟 Flash ECC/NMI、低电压写入或真实器件寿命；全片擦除、读保护变更或烧录器擦除参数页仍会丢失参数。当前应用尚未调用该模块，现有串口协议也尚未接入保存命令，不能据此认定上位机保存按钮已可用。
 

@@ -15,6 +15,9 @@ namespace torque
  * Save is blocking and must never run in an ISR. The caller must physically stop
  * output and prevent concurrent restart before passing output_stopped=true, and
  * keep it stopped until Save returns. A zero target alone is not proof of this.
+ * Records use version 2: six floats (PID gains, Kalman Q/R and torque limit),
+ * CRC-16 plus its inverse, and a final commit marker in 48 bytes. Version 1
+ * records are rejected; Load returns NotFound if neither page has a valid v2 record.
  */
 class ParameterStorage final
 {

@@ -11,12 +11,15 @@ namespace torque
 {
 namespace
 {
-using Record = std::array<uint8_t, 40>;
+using Record = std::array<uint8_t, 48>;
 using RecordCrc = crc::CRCX<16, 0x1021, 0xFFFF, false, false, 0x0000>;
 constexpr uint32_t Magic = 0x51524F54U;
-constexpr uint32_t Version = 1U;
+constexpr uint32_t Version = 2U;
 constexpr uint32_t Commit = 0x44455653U;
-constexpr std::size_t PayloadEnd = 32U;
+constexpr uint32_t PayloadSize = 24U;
+constexpr std::size_t PayloadEnd = 16U + PayloadSize;
+
+static_assert(sizeof(Record) % sizeof(uint64_t) == 0);
 
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
 static_assert(FLASH_PAGE_SIZE == 2048U, "Storage layout requires G431 2 KB pages");
@@ -65,13 +68,15 @@ Record Encode(const Parameters& parameters, uint32_t generation)
     Write32(record.data(), Magic);
     Write32(record.data() + 4, Version);
     Write32(record.data() + 8, generation);
-    Write32(record.data() + 12, 16U);
+    Write32(record.data() + 12, PayloadSize);
     WriteFloat(record.data() + 16, parameters.kp);
     WriteFloat(record.data() + 20, parameters.ki);
     WriteFloat(record.data() + 24, parameters.kd);
-    WriteFloat(record.data() + 28, parameters.cutoff_hz);
-    Write32(record.data() + 32, Checksum(record));
-    Write32(record.data() + 36, Commit);
+    WriteFloat(record.data() + 28, parameters.process_noise);
+    WriteFloat(record.data() + 32, parameters.measurement_noise);
+    WriteFloat(record.data() + 36, parameters.torque_limit);
+    Write32(record.data() + PayloadEnd, Checksum(record));
+    Write32(record.data() + PayloadEnd + 4U, Commit);
     return record;
 }
 } // namespace
@@ -89,13 +94,15 @@ bool ParameterStorage::ReadSlot(unsigned slot, Parameters& parameters, uint32_t&
     std::memcpy(record.data(), reinterpret_cast<const void*>(RegionStart_ + slot * FLASH_PAGE_SIZE),
                 record.size());
     if (Read32(record.data()) != Magic || Read32(record.data() + 4) != Version ||
-        Read32(record.data() + 12) != 16U || Read32(record.data() + 36) != Commit ||
-        Read32(record.data() + 32) != Checksum(record))
+        Read32(record.data() + 12) != PayloadSize ||
+        Read32(record.data() + PayloadEnd + 4U) != Commit ||
+        Read32(record.data() + PayloadEnd) != Checksum(record))
     {
         return false;
     }
     const Parameters candidate{ReadFloat(record.data() + 16), ReadFloat(record.data() + 20),
-                               ReadFloat(record.data() + 24), ReadFloat(record.data() + 28)};
+                               ReadFloat(record.data() + 24), ReadFloat(record.data() + 28),
+                               ReadFloat(record.data() + 32), ReadFloat(record.data() + 36)};
     if (!IsValid(candidate))
     {
         return false;
