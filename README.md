@@ -34,7 +34,8 @@
 模块细节不在本文重复维护：
 
 - [ADS1220 接入和最小案例](UserCode/ADS1220/README.md)
-- [串口帧格式、CRC、Python 联调示例和通信约束](UserCode/HostCommunication/README.md)
+- [串口协议及通信约束](UserCode/HostCommunication/README.md)
+- [上位机接口与控制交接文档](UserCode/HostCommunication/HANDOFF.md)
 
 ## 当前硬件配置
 
@@ -53,7 +54,7 @@
 | USART3 RX DMA | DMA1 Channel2，Circular，Byte | 接收命令帧 |
 | USART3 TX DMA | DMA1 Channel3，Normal，Byte | 发送测量反馈 |
 
-频率基于当前 72 MHz 时钟及现有定时器分频。RTOS tick 为 1 kHz；业务中的 `osDelay(1)`、`osDelay(50)` 分别对应约 1 ms、50 ms 的任务延时。
+频率基于当前 72 MHz 时钟及现有定时器分频。RTOS tick 为 1 kHz；当前工作区业务中的 `osDelay(1)`、`osDelay(10)` 分别对应约 1 ms、10 ms 的任务延时。
 
 ADS1220 当前使用 AIN0-AIN1 差分输入、128 倍增益、正常模式 20 SPS、外部 REFP0/REFN0 的 5 V 参考、50/60 Hz 抑制。外部参考电压必须真实接入。驱动未管理 CS 引脚，接线与时序限制见其头文件和模块 README。
 
@@ -74,7 +75,7 @@ ADS1220 当前使用 AIN0-AIN1 差分输入、128 倍增益、正常模式 20 SP
 | `Task_get_torque` | 消费有序命令、执行参数与保存操作；读取 ADS1220，新样本换算为扭矩幅值并更新卡尔曼估计，随后延时 1 tick |
 | `TIM2_Vout_pid_PeriodElapsedCallback` | 读取板载 ADC 电压；输出运行时执行原电压 PID，停止时将 PWM 比较值保持为零 |
 | `TIM3_Torque_pid_PeriodElapsedCallback` | 已启用且反馈有效时，直接调用 cpkg `PIDMotor::calc()` 计算电压目标，并限制到 0～18 V |
-| `Task_host_communication` | 每轮延时 50 tick，优先发送命令应答，没有待发应答时上传测量反馈；DMA 忙时保留应答、跳过反馈 |
+| `Task_host_communication` | 每轮延时 10 tick，优先发送命令应答，没有待发应答时上传测量反馈；DMA 忙时保留应答、跳过反馈 |
 
 ADS1220 的 `Update()` 未就绪时立即返回 `NotReady`；就绪后仍使用同步 HAL SPI 收发。它不等待一次 ADC 转换，不意味着整个驱动都是异步接口。采样任务只在读取成功时发布新测量值。
 
@@ -82,7 +83,7 @@ ADS1220 的 `Update()` 未就绪时立即返回 `NotReady`；就绪后仍使用�
 
 扭矩外环输出的单位是电压，因此输出上限仍为 18 V，`TorqueLimit` 限制的是扭矩目标，不是 PWM 或电压。关闭扭矩环会清空两个 PID 状态并停止 PWM；使能需要有效反馈和显式命令。原 0 V 电压命令在任意模式下均停止输出；扭矩模式下非零电压命令返回 `ModeConflict`。SPI/数值错误使扭矩环关闭，不会在反馈恢复后自行重新使能。
 
-任务与 ISR 之间的独立共享浮点值采用无锁 `std::atomic<float>` 交接；目标、使能和 PID 配置通过短中断临界区与 TIM3 串行化。电压与扭矩不保证来自同一采样时刻。无命令应答时反馈约为 20 Hz；调参期间应答优先，反馈会让位，不是硬实时周期。
+任务与 ISR 之间的独立共享浮点值采用无锁 `std::atomic<float>` 交接；目标、使能和 PID 配置通过短中断临界区与 TIM3 串行化。电压与扭矩不保证来自同一采样时刻。当前工作区无命令应答时反馈约为 100 Hz；调参期间应答优先，反馈会让位，不是硬实时周期；上报加快不提高扭矩新测量率。
 
 ## 编译
 

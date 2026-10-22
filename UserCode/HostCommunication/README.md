@@ -1,5 +1,7 @@
 # 上位机通信
 
+上位机开发交接见 [HANDOFF.md](HANDOFF.md)：包含 UI 按钮对应命令、启停与保存流程、参数语义、应答匹配、超时策略及接入验收清单。
+
 USART3：115200、8N1，无流控。PC10 为 TX、PC11 为 RX；使用 3.3 V 电平 USB-UART，交叉连接 TX/RX 并共地，不能直接连接 RS-232 电平。
 
 接收复用 `protocol::UartRxSync`（找帧头阶段 IT，帧内容 RX DMA Circular）；发送使用 TX DMA Normal。`HostCommunication` 独占 UART 收发与错误回调，不与串口打印混用。CubeMX 静态配置不变，没有修改 BasicComponents。
@@ -62,7 +64,7 @@ CRC 使用 **CRC-16/CCITT-FALSE**：多项式 `0x1021`，初值 `0xFFFF`，输�
 
 ### 上行反馈 `81`
 
-word0 为实测电压，word1 为扭矩反馈，均为 float32。只有成功提交反馈 DMA 后反馈序号才递增并以 256 回绕；应答不会推进反馈序号。非有限反馈不发送。任务可按既有 50 tick 周期安排反馈；TX 忙时跳过反馈，不覆盖活动缓冲区。
+word0 为实测电压，word1 为扭矩反馈，均为 float32。只有成功提交反馈 DMA 后反馈序号才递增并以 256 回绕；应答不会推进反馈序号。非有限反馈不发送。当前工作区任务延时为 10 tick（1 kHz tick 下约 10 ms），无待发应答时约 100 Hz；TX 忙时跳过反馈，不覆盖活动缓冲区，不能据此推断板上旧固件已升级。
 
 ### 上行命令应答 `82`
 
