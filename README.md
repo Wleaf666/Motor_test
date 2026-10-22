@@ -20,6 +20,7 @@
 | `UserCode/app.cpp` | 启动流程、电压 PID、扭矩采样和通信任务 |
 | `UserCode/ADS1220/` | 外部 ADC 驱动及使用案例 |
 | `UserCode/HostCommunication/` | 上位机协议、CRC 校验和 UART DMA 收发 |
+| `UserCode/Parameters/` | 扭矩 PID 与低通截止频率参数的双页 Flash 存储接口 |
 | `UserCode/arena.cpp` | 全局 C++ `new` 使用的 4 KB 静态线性分配区，单块内存不回收 |
 | `Modules/BasicComponents/` | Git 子模块，由 cpkg 管理组件依赖 |
 | `Drivers/`、`Middlewares/` | STM32 HAL、CMSIS、FreeRTOS |
@@ -134,9 +135,27 @@ cmake --build --preset Debug
 
 板级配置以 `.ioc` 为准，通过 CubeMX 修改；业务逻辑放在 `UserCode`。避免在 CubeMX 自动生成区直接添加不可再生的代码。
 
+## 参数存储
+
+`STM32G431xx_FLASH.ld` 将程序 Flash 限制为 124 KB，末尾 `0x0801F000～0x0801FFFF` 的两个 2 KB 页预留给参数，不放入固件加载段。链接符号 `__torque_parameters_start` 和 `__torque_parameters_size` 分别表示区域起始地址和大小。
+
+`torque::ParameterStorage` 保存 `Kp/Ki/Kd` 和低通截止频率（Hz），不保存运行目标。调用方传入上述链接区域；存储实现还会核对区域确为芯片 Flash 的末尾两页。两页交替写入，CRC-16/CCITT-FALSE 校验记录，最后写提交标记，读回比对后返回结果。加载选择最新有效记录，损坏或未完成的新记录不会覆盖上一份有效参数；没有有效记录时返回 `NotFound`，不伪造默认参数。
+
+保存是同步操作，必须由单个任务独占 Flash。调用方必须先实际停止输出，并禁止其他路径在保存期间重新启动，才能传入 `output_stopped=true`；零目标本身不是输出已停止的证明。传入 false 时不会擦写。擦除、编程、读回和重新加锁失败均有独立状态；保存失败后不能假定 Flash 已重新锁定或输出可以恢复。存储层只检查数值有限、PID 增益非负及截止频率大于零，应用仍须按实际采样率检查截止频率及其他控制边界。
+
+这些恢复保证针对可读的有效 Flash 记录，不代表电源异常期间的硬件可靠性认证。主机测试未模拟 Flash ECC/NMI、低电压写入或真实器件寿命；全片擦除、读保护变更或烧录器擦除参数页仍会丢失参数。当前应用尚未调用该模块，现有串口协议也尚未接入保存命令，不能据此认定上位机保存按钮已可用。
+
+主机回归需要完整支持 C++17 的编译器（旧版 MinGW GCC 6.3 不满足）；例如在 WSL 的工程目录运行：
+
+```text
+g++ -std=c++17 -Wall -Wextra -Werror -Itests/parameters -IUserCode/Parameters -IModules/BasicComponents/libs/utils/crc UserCode/Parameters/ParameterStorage.cpp tests/parameters/storage.cpp -o build/parameter-storage-test
+./build/parameter-storage-test
+```
+
 ## 验证范围
 
 - `tests/ads1220`：校准、配置失败恢复、新旧数据区分、单次/连续转换、监测换算和数值边界。
 - `tests/host_communication`：黄金帧、CRC 损坏、目标范围、IT/DMA 接收、错位同步和发送缓冲生命周期。主机编译运行命令见通信模块 README。
+- `tests/parameters`：重启后恢复、逐位记录损坏回退、运行中拒绝保存、非法参数与分区、每个写入步骤中断、HAL 错误及保存代数回绕。
 
 这些是主机模拟测试，不是实板或功率电路验证。工程没有统一 `ctest` 入口，构建成功也不代表传感器标定、硬件保护及闭环参数已经适用于实际设备。
