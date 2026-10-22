@@ -1,4 +1,6 @@
 #include "cmsis_os2.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include "adc.h"
 #include "tim.h"
 #include "algorithm"
@@ -10,6 +12,8 @@
 
 #include "ADS1220/ADS1220.hpp"
 #include "HostCommunication/HostCommunication.hpp"
+#include "Parameters/ParameterStorage.hpp"
+#include "Torque/TorqueFeedback.hpp"
 
 constexpr float V_in        = 24.0;
 constexpr float PWM_CNT_MAX = 3599 * 0.9;
@@ -27,15 +31,34 @@ uint16_t ADC_Value[2];
 static_assert(std::atomic<float>::is_always_lock_free);
 std::atomic<float> V_target{0.0f};
 
-PIDMotor* V_pid    = nullptr;
-ADS1220* ADS1220_  = nullptr;
-HostCommunication Host_(&huart3, MAX_VOUT);
+PIDMotor* V_pid = nullptr;
+ADS1220* ADS1220_ = nullptr;
+HostCommunication* Host_ = nullptr;
+PIDMotor* Torque_pid = nullptr;
+TorqueFeedback* Torque_filter = nullptr;
+torque::ParameterStorage* Parameter_store = nullptr;
 
 std::atomic<float> Torque_feedback{0.0f};
-std::atomic<float> Torque_Vfeedback{0.0f};
+std::atomic<bool> Output_running{false};
+torque::Parameters Torque_parameters{};
+float Torque_target = 0.0f;
+bool Torque_enabled = false;
+bool Torque_feedback_valid = false;
+bool Output_stopped = true;
+constexpr uint32_t Torque_task_stack_bytes = 1024U;
+constexpr uint32_t Host_task_stack_bytes = 512U;
 
-
+// Objects and both existing business tasks' stacks/control blocks share the boot arena.
+// This avoids exhausting the separate 3 KB RTOS heap while Init is still alive.
+static_assert(sizeof(ADS1220) + 2U * sizeof(PIDMotor) + sizeof(HostCommunication) +
+                  sizeof(TorqueFeedback) + sizeof(torque::ParameterStorage) +
+                  Torque_task_stack_bytes + Host_task_stack_bytes + 2U * sizeof(StaticTask_t) +
+                  2U * sizeof(osThreadAttr_t) + alignof(HostCommunication) - 1U +
+                  12U * (alignof(std::max_align_t) - 1U) <= 4096U);
+extern "C" uint8_t __torque_parameters_start[];
+extern "C" uint8_t __torque_parameters_size[];
 PIDMotor::Config V_cfg = { .Kp = 5000.0, .Ki = 20.0, .Kd = 0.0, .abs_output_max = PWM_CNT_MAX };
+
 
 void ADC_init()
 {
@@ -46,6 +69,10 @@ void ADC_init()
 void PID_init()
 {
     V_pid = new PIDMotor(V_cfg);
+    Torque_pid = new PIDMotor({Torque_parameters.kp, Torque_parameters.ki,
+                               Torque_parameters.kd, MAX_VOUT});
+    Torque_filter = new TorqueFeedback;
+    Torque_filter->Configure(Torque_parameters.process_noise, Torque_parameters.measurement_noise);
 }
 
 float adc_V;
@@ -55,10 +82,16 @@ float pwm_output;
 
 void TIM2_Vout_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
+    (void)htim;
     int32_t raw_V = ADC_Value[1];
     adc_V         = raw_V / ADC_MAX * Vref;
     const float voltage = adc_V * (Rbottom + Rtop) / Rbottom;
     V_feedback.store(voltage, std::memory_order_relaxed);
+    if (!Output_running.load(std::memory_order_acquire))
+    {
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+        return;
+    }
     pwm_output = V_pid->calc(V_target.load(std::memory_order_relaxed), voltage);
     pwm_output    = std::clamp(pwm_output, 0.0f, PWM_CNT_MAX);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, static_cast<uint32_t>(pwm_output));
@@ -69,24 +102,41 @@ constexpr float TorqueRange = 20.0f;
 
 void TIM3_Torque_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
-    // 只换算测量值，不通过扭矩环修改上位机指定的 V_target。
-    Torque_feedback.store(Torque_Vfeedback.load(std::memory_order_relaxed) / Vrange * TorqueRange,
-                          std::memory_order_relaxed);
+    (void)htim;
+    if (!Torque_enabled || !Torque_feedback_valid ||
+        !Output_running.load(std::memory_order_acquire))
+    {
+        return;
+    }
+    if (Torque_target == 0.0f)
+    {
+        Torque_pid->reset();
+        V_target.store(0.0f, std::memory_order_relaxed);
+        return;
+    }
+    // Discrete PIDMotor gains already include the configured TIM3 period. No dt scaling.
+    const float voltage = Torque_pid->calc(Torque_target,
+                                          Torque_feedback.load(std::memory_order_relaxed));
+    if (!std::isfinite(voltage))
+    {
+        Torque_enabled = false;
+        Torque_pid->reset();
+        Output_running.store(false, std::memory_order_release);
+        V_target.store(0.0f, std::memory_order_relaxed);
+        return;
+    }
+    V_target.store(std::clamp(voltage, 0.0f, MAX_VOUT), std::memory_order_relaxed);
 }
 
-void TIM_init()
+bool TIM_init()
 {
-    HAL_TIM_RegisterCallback(&htim2,
-                             HAL_TIM_PERIOD_ELAPSED_CB_ID,
-                             TIM2_Vout_pid_PeriodElapsedCallback);
-    HAL_TIM_Base_Start_IT(&htim2);
-
-    HAL_TIM_RegisterCallback(&htim3,
-                             HAL_TIM_PERIOD_ELAPSED_CB_ID,
-                             TIM3_Torque_pid_PeriodElapsedCallback);
-    HAL_TIM_Base_Start_IT(&htim3);
-
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+    return HAL_TIM_RegisterCallback(&htim2, HAL_TIM_PERIOD_ELAPSED_CB_ID,
+                                   TIM2_Vout_pid_PeriodElapsedCallback) == HAL_OK &&
+           HAL_TIM_RegisterCallback(&htim3, HAL_TIM_PERIOD_ELAPSED_CB_ID,
+                                   TIM3_Torque_pid_PeriodElapsedCallback) == HAL_OK &&
+           HAL_TIM_Base_Start_IT(&htim2) == HAL_OK &&
+           HAL_TIM_Base_Start_IT(&htim3) == HAL_OK;
 }
 
 bool ADS1220_init()
@@ -114,7 +164,8 @@ bool ADS1220_init()
     return ADS1220_->Init() == ADS1220::Status::Ok;
 }
 
-float Vref_5V               = 5.0;
+
+float Vref_5V = 5.0;
 float TorqueV_feedback_bias = 0;
 
 float getBias()
@@ -140,48 +191,286 @@ float getBias()
     return zero_sum / static_cast<float>(zero_samples);
 }
 
+bool StopOutput()
+{
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    Torque_enabled = false;
+    Torque_pid->reset();
+    V_target.store(0.0f, std::memory_order_relaxed);
+    Output_running.store(false, std::memory_order_release);
+    __set_PRIMASK(primask);
+    const bool stopped = Output_stopped || HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1) == HAL_OK;
+    Output_stopped = stopped;
+    V_pid->reset(); // TIM2 cannot access the controller while Output_running is false.
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+    return stopped;
+}
+
+bool StartOutput()
+{
+    if (Output_running.load(std::memory_order_acquire))
+    {
+        return true;
+    }
+    V_pid->reset();
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+    // A failed HAL operation is not proof that the physical output is stopped.
+    Output_stopped = false;
+    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK)
+    {
+        return false;
+    }
+    Output_running.store(true, std::memory_order_release);
+    return true;
+}
+
+void ApplyParameters(const torque::Parameters& parameters)
+{
+    const bool noise_changed = parameters.process_noise != Torque_parameters.process_noise ||
+                               parameters.measurement_noise != Torque_parameters.measurement_noise;
+    Torque_parameters = parameters; // Same task owns configuration and the Kalman estimator.
+    if (noise_changed)
+    {
+        Torque_filter->Configure(parameters.process_noise, parameters.measurement_noise);
+    }
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    Torque_pid->setConfig({parameters.kp, parameters.ki, parameters.kd, MAX_VOUT});
+    Torque_pid->reset();
+    Torque_target = std::min(Torque_target, parameters.torque_limit);
+    __set_PRIMASK(primask);
+}
+
+bool ParameterValue(torque::Parameters& parameters, uint32_t id, float*& value)
+{
+    using Id = host_protocol::ParameterId;
+    switch (static_cast<Id>(id))
+    {
+    case Id::Kp: value = &parameters.kp; break;
+    case Id::Ki: value = &parameters.ki; break;
+    case Id::Kd: value = &parameters.kd; break;
+    case Id::ProcessNoise: value = &parameters.process_noise; break;
+    case Id::MeasurementNoise: value = &parameters.measurement_noise; break;
+    case Id::TorqueLimit: value = &parameters.torque_limit; break;
+    default: return false;
+    }
+    return true;
+}
+
+void InvalidateTorqueFeedback()
+{
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    const bool active = Torque_enabled;
+    Torque_feedback_valid = false;
+    __set_PRIMASK(primask);
+    // Invalid torque must stop its own loop, not change the existing manual voltage mode.
+    if (active) StopOutput();
+}
+
+void UpdateTorqueFeedback(float sensor_voltage)
+{
+    float filtered;
+    if (Torque_filter->Update(sensor_voltage / Vrange * TorqueRange, filtered))
+    {
+        Torque_feedback.store(filtered, std::memory_order_relaxed);
+        const uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        Torque_feedback_valid = true;
+        __set_PRIMASK(primask);
+    }
+    else
+    {
+        InvalidateTorqueFeedback();
+    }
+}
+
 void Host_update()
 {
-    float target;
-    if (Host_.TakeTarget(target))
+    using Type = host_protocol::CommandType;
+    using Result = host_protocol::Result;
+    host_protocol::Command command;
+    if (!Host_->TakeCommand(command))
     {
-        V_target.store(target, std::memory_order_relaxed);
+        return;
     }
+    host_protocol::Response response{command.type, command.sequence, Result::Ok, 0.0f, false, false};
+    const uint32_t initial_primask = __get_PRIMASK();
+    __disable_irq();
+    response.torque_enabled = Torque_enabled;
+    response.feedback_valid = Torque_feedback_valid;
+    __set_PRIMASK(initial_primask);
+    switch (command.type)
+    {
+    case Type::SetVoltage:
+        if (!std::isfinite(command.value) || command.value < 0.0f || command.value > MAX_VOUT)
+        {
+            response.result = Result::InvalidValue;
+        }
+        else if (command.value == 0.0f)
+        {
+            if (!StopOutput()) response.result = Result::HardwareError;
+        }
+        else if (response.torque_enabled)
+        {
+            response.result = Result::ModeConflict;
+        }
+        else if (!StartOutput())
+        {
+            response.result = Result::HardwareError;
+        }
+        else
+        {
+            V_target.store(command.value, std::memory_order_relaxed);
+            response.value = command.value;
+        }
+        break;
+    case Type::SetTorque:
+        if (!std::isfinite(command.value) || command.value < 0.0f ||
+            command.value > Torque_parameters.torque_limit)
+        {
+            response.result = Result::InvalidValue;
+        }
+        else
+        {
+            const uint32_t primask = __get_PRIMASK();
+            __disable_irq();
+            Torque_target = command.value;
+            __set_PRIMASK(primask);
+            response.value = command.value;
+        }
+        break;
+    case Type::SetTorqueEnabled:
+        if (command.argument > 1U)
+        {
+            response.result = Result::InvalidValue;
+        }
+        else if (command.argument == 0U)
+        {
+            if (!StopOutput()) response.result = Result::HardwareError;
+        }
+        else if (!response.feedback_valid)
+        {
+            response.result = Result::NotReady;
+        }
+        else if (!StopOutput() || !StartOutput())
+        {
+            response.result = Result::HardwareError;
+        }
+        else
+        {
+            const uint32_t primask = __get_PRIMASK();
+            __disable_irq();
+            Torque_enabled = true;
+            __set_PRIMASK(primask);
+            response.value = 1.0f;
+        }
+        break;
+    case Type::SetParameter:
+    case Type::GetParameter:
+    {
+        auto parameters = Torque_parameters;
+        float* value = nullptr;
+        if (!ParameterValue(parameters, command.argument, value))
+        {
+            response.result = Result::InvalidValue;
+        }
+        else if (command.type == Type::GetParameter)
+        {
+            response.value = *value;
+        }
+        else
+        {
+            *value = command.value;
+            if (!torque::IsValid(parameters))
+            {
+                response.result = Result::InvalidValue;
+            }
+            else
+            {
+                ApplyParameters(parameters);
+                response.value = *value;
+            }
+        }
+        break;
+    }
+    case Type::SaveParameters:
+        if (response.torque_enabled || !Output_stopped || V_target.load(std::memory_order_relaxed) != 0.0f)
+        {
+            response.result = Result::OutputActive;
+        }
+        else
+        {
+            const auto status = Parameter_store->Save(Torque_parameters, true);
+            response.value = static_cast<float>(status);
+            if (status != torque::ParameterStorage::Status::Ok) response.result = Result::StorageError;
+        }
+        break;
+    case Type::GetState:
+        response.value = Torque_target;
+        break;
+    default:
+        response.result = Result::InvalidValue;
+        break;
+    }
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    response.torque_enabled = Torque_enabled;
+    response.feedback_valid = Torque_feedback_valid;
+    __set_PRIMASK(primask);
+    // TakeCommand reserves this one response slot until DMA accepts the reply.
+    Host_->PublishResponse(response);
 }
 
 void Task_get_torque(void* argument)
 {
+    (void)argument;
     for (;;)
     {
-        // 复用现有 1 ms 任务消费命令，不增加接收线程或发送调度计数器。
         Host_update();
         Vref_5V = ADC_Value[0] / ADC_MAX * Vref;
-        if (ADS1220_->Update() == ADS1220::Status::Ok)
+        const auto status = ADS1220_->Update();
+        if (status == ADS1220::Status::Ok)
         {
-            Torque_Vfeedback.store(ADS1220_->GetGainVoltage() - TorqueV_feedback_bias,
-                                   std::memory_order_relaxed);
+            UpdateTorqueFeedback(ADS1220_->GetGainVoltage() - TorqueV_feedback_bias);
+        }
+        else if (status != ADS1220::Status::NotReady)
+        {
+            InvalidateTorqueFeedback();
         }
         osDelay(1);
     }
 }
 
+
 HAL_StatusTypeDef Host_tx_status = HAL_OK;
 
 void Task_host_communication(void* argument)
 {
+    (void)argument;
     for (;;)
     {
         // 本工程 FreeRTOS 时基为 1 kHz，50 tick 对应 50 ms。
         osDelay(50);
-        // 每 50 ms 发送最新测量值；DMA 忙则跳过，不排队、不覆盖发送缓冲。
-        Host_tx_status = Host_.SendFeedback(V_feedback.load(std::memory_order_relaxed),
-                                           Torque_feedback.load(std::memory_order_relaxed));
+        // One task owns TX: responses take priority and remain pending while DMA is busy.
+        Host_tx_status = Host_->HasPendingResponse()
+            ? Host_->SendPendingResponse()
+            : Host_->SendFeedback(V_feedback.load(std::memory_order_relaxed),
+                                 Torque_feedback.load(std::memory_order_relaxed));
     }
 }
 
 extern "C" void Init(void* argument)
 {
+    (void)argument;
     /* 初始化代码 */
+    Host_ = new HostCommunication(&huart3, MAX_VOUT);
+    Parameter_store = new torque::ParameterStorage(
+        reinterpret_cast<std::uintptr_t>(__torque_parameters_start),
+        reinterpret_cast<std::uintptr_t>(__torque_parameters_size));
+    // Defaults apply only when no valid stored record exists; never restore target or enable.
+    Parameter_store->Load(Torque_parameters);
     if (!ADS1220_init())
     {
         osThreadExit();
@@ -190,17 +479,41 @@ extern "C" void Init(void* argument)
     ADC_init();
     // 无载归零先完成，再启动 PWM 和主机通信，避免把工作负载当成零点。
     TorqueV_feedback_bias = getBias();
-    if (!Host_.Init())
+    if (!Host_->Init())
     {
         osThreadExit();
         return;
     }
 
     PID_init();
-    TIM_init();
+    if (!TIM_init())
+    {
+        StopOutput();
+        osThreadExit();
+        return;
+    }
 
-    osThreadNew(Task_get_torque, nullptr, nullptr);
-    osThreadNew(Task_host_communication, nullptr, nullptr);
+    // Keep the descriptors in the boot arena too; Init retains its existing small stack.
+    auto* sample_attributes = new osThreadAttr_t{};
+    sample_attributes->name = "torque";
+    sample_attributes->stack_mem = new StackType_t[Torque_task_stack_bytes / sizeof(StackType_t)];
+    sample_attributes->stack_size = Torque_task_stack_bytes;
+    sample_attributes->cb_mem = new StaticTask_t;
+    sample_attributes->cb_size = sizeof(StaticTask_t);
+    const auto sample_task = osThreadNew(Task_get_torque, nullptr, sample_attributes);
+    auto* host_attributes = new osThreadAttr_t{};
+    host_attributes->name = "host";
+    host_attributes->stack_mem = new StackType_t[Host_task_stack_bytes / sizeof(StackType_t)];
+    host_attributes->stack_size = Host_task_stack_bytes;
+    host_attributes->cb_mem = new StaticTask_t;
+    host_attributes->cb_size = sizeof(StaticTask_t);
+    const auto host_task = osThreadNew(Task_host_communication, nullptr, host_attributes);
+    if (sample_task == nullptr || host_task == nullptr)
+    {
+        if (sample_task != nullptr) osThreadTerminate(sample_task);
+        if (host_task != nullptr) osThreadTerminate(host_task);
+        StopOutput();
+    }
 
     /* 初始化完成后退出线程 */
     osThreadExit();
