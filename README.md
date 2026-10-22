@@ -19,6 +19,7 @@
 | `Motor_test.ioc` | CubeMX 外设、时钟、DMA、中断及 RTOS 配置 |
 | `Core/` | CubeMX 生成的初始化、IRQ 分发和 HAL/RTOS 配置 |
 | `UserCode/app.cpp` | 原有初始化、采样/通信任务；TIM2 电压内环与 TIM3 扭矩外环接入 |
+| `UserCode/app_control.cpp` | 应用层命令执行、参数映射、输出启停和反馈交接；不实现 PID 或协议算法 |
 | `UserCode/ADS1220/` | 外部 ADC 驱动及使用案例 |
 | `UserCode/HostCommunication/` | 上位机协议、CRC 校验和 UART DMA 收发 |
 | `UserCode/Parameters/` | 扭矩 PID、卡尔曼 Q/R 与目标上限的双页 Flash 存储接口 |
@@ -181,7 +182,7 @@ g++ -std=c++17 -Wall -Wextra -Werror -Itests/parameters -IUserCode/Parameters -I
 以下运行真实应用代码，只有 HAL 和调度是模拟。两次独立进程用于验证上电读取已保存参数，而不是只检查同一对象的缓存；测试生成的 Flash 镜像在恢复校验后删除。
 
 ```text
-g++ -std=c++17 -Wall -Wextra -Werror -fno-pie -no-pie -Wl,--defsym=__torque_parameters_start=0x0801F000,--defsym=__torque_parameters_size=4096 -Itests/torque_application -IUserCode -IUserCode/HostCommunication -IModules/BasicComponents/protocol/UartRxSync -IModules/BasicComponents/memory/DMABuffer -IModules/BasicComponents/services/watchdog -IModules/BasicComponents/libs/utils/crc -IModules/BasicComponents/libs/control/pid_motor -IModules/BasicComponents/libs/math/EKF -IModules/BasicComponents/libs/math/LinearAlgebra -IModules/BasicComponents/memory/StaticArena tests/torque_application/application.cpp UserCode/ADS1220/ADS1220.cpp UserCode/HostCommunication/HostCommunication.cpp UserCode/Parameters/ParameterStorage.cpp UserCode/arena.cpp Modules/BasicComponents/libs/control/pid_motor/pid_motor.cpp Modules/BasicComponents/services/watchdog/watchdog.cpp -o build/torque-application-test
+g++ -std=c++17 -Wall -Wextra -Werror -fno-pie -no-pie -Wl,--defsym=__torque_parameters_start=0x0801F000,--defsym=__torque_parameters_size=4096 -Itests/torque_application -IUserCode -IUserCode/HostCommunication -IModules/BasicComponents/protocol/UartRxSync -IModules/BasicComponents/memory/DMABuffer -IModules/BasicComponents/services/watchdog -IModules/BasicComponents/libs/utils/crc -IModules/BasicComponents/libs/control/pid_motor -IModules/BasicComponents/libs/math/EKF -IModules/BasicComponents/libs/math/LinearAlgebra -IModules/BasicComponents/memory/StaticArena tests/torque_application/application.cpp UserCode/app_control.cpp UserCode/ADS1220/ADS1220.cpp UserCode/HostCommunication/HostCommunication.cpp UserCode/Parameters/ParameterStorage.cpp UserCode/arena.cpp Modules/BasicComponents/libs/control/pid_motor/pid_motor.cpp Modules/BasicComponents/services/watchdog/watchdog.cpp -o build/torque-application-test
 ./build/torque-application-test --exercise build/torque-application.flash
 ./build/torque-application-test --restore build/torque-application.flash
 ```

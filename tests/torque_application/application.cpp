@@ -98,7 +98,7 @@ host_protocol::Frame Send(Type type, float value = 0.0f, uint32_t argument = 0)
             huart3.callbacks[HAL_UART_RX_COMPLETE_CB_ID](&huart3);
         }
     }
-    Host_update();
+    Host_update(MAX_VOUT);
     RunTask(Task_host_communication, 2); // One actual send iteration, then pause at the next delay.
     assert(tx_data != nullptr && tx_size == frame.size() && tx_data[2] == 0x82);
     host_protocol::Frame reply;
