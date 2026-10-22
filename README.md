@@ -21,7 +21,7 @@
 | `UserCode/ADS1220/` | 外部 ADC 驱动及使用案例 |
 | `UserCode/HostCommunication/` | 上位机协议、CRC 校验和 UART DMA 收发 |
 | `UserCode/Parameters/` | 扭矩 PID、卡尔曼 Q/R 与目标上限的双页 Flash 存储接口 |
-| `UserCode/arena.cpp` | 全局 C++ `new` 使用的 4 KB 静态线性分配区，单块内存不回收 |
+| `UserCode/arena.cpp` | 全局 C++ `new` 使用的 4 KB 静态线性分配区；支持 DMA 类对象的 C++17 对齐分配，单块内存不回收 |
 | `Modules/BasicComponents/` | Git 子模块，由 cpkg 管理组件依赖 |
 | `Drivers/`、`Middlewares/` | STM32 HAL、CMSIS、FreeRTOS |
 | `tests/` | 使用模拟 HAL 的主机端行为回归测试 |
