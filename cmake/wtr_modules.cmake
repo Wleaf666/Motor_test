@@ -10,6 +10,8 @@ set(WTR_MANAGED_REPOSITORIES
 )
 
 set(WTR_MANAGED_PACKAGE_DIRS
+    Modules/BasicComponents/libs/math/LinearAlgebra
+    Modules/BasicComponents/libs/math/EKF
     Modules/BasicComponents/libs/utils/crc
     Modules/BasicComponents/libs/control/pid_motor
     Modules/BasicComponents/memory/StaticArena
@@ -17,8 +19,6 @@ set(WTR_MANAGED_PACKAGE_DIRS
     Modules/BasicComponents/memory/DMABuffer
     Modules/BasicComponents/protocol/UartRxSync
     Modules/BasicComponents/utils
-    Modules/BasicComponents/libs/math/LinearAlgebra
-    Modules/BasicComponents/libs/math/EKF
 )
 
 foreach(_wtr_package_dir IN LISTS WTR_MANAGED_PACKAGE_DIRS)
@@ -33,15 +33,17 @@ foreach(_wtr_package_dir IN LISTS WTR_MANAGED_PACKAGE_DIRS)
 endforeach()
 
 set(WTR_DIRECT_PACKAGE_TARGETS
+    Math::EKF
     libs::CRC
     libs::PIDMotor
     memory::StaticArena
     protocol::UartRxSync
     utils
-    Math::EKF
 )
 
 set(WTR_RESOLVED_PACKAGE_TARGETS
+    Math::LinearAlgebra
+    Math::EKF
     libs::CRC
     libs::PIDMotor
     memory::StaticArena
@@ -49,8 +51,6 @@ set(WTR_RESOLVED_PACKAGE_TARGETS
     memory::DMABuffer
     protocol::UartRxSync
     utils
-    Math::LinearAlgebra
-    Math::EKF
     stm32cubemx
 )
 

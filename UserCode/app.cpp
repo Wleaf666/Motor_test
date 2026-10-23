@@ -218,8 +218,8 @@ void Task_host_communication(void* argument)
     (void)argument;
     for (;;)
     {
-        // 本工程 FreeRTOS 时基为 1 kHz，50 tick 对应 50 ms。
-        osDelay(50);
+        // 本工程 FreeRTOS 时基为 1 kHz，10 tick 对应 10 ms。
+        osDelay(10);
         // One task owns TX: responses take priority and remain pending while DMA is busy.
         Host_tx_status = Host_->HasPendingResponse()
             ? Host_->SendPendingResponse()
