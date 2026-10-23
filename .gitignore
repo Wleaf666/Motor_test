@@ -22,6 +22,8 @@ Release/
 # section: vscode
 .vscode/
 
+tests/
+
 ### STM32CubeMX ###
 # CubeMX auto-generated sources and metadata
 /Core/
@@ -48,4 +50,5 @@ startup_stm32*.s
 # OS-specific system files
 .DS_Store
 Thumbs.db
+
 
