@@ -167,21 +167,36 @@ void Exercise(const char* image)
     for (unsigned cycle = 0; cycle < 10000; ++cycle)
     {
         htim3.callback(&htim3);
-        assert(V_target.load() == 6.0f);
+        assert(V_target.load() == 6.5f);
     }
     // Lowering the selected target or its runtime limit constrains the next TIM3 output.
     ExpectResult(Send(Type::SetTorque, 0.25f), Result::Ok);
     htim3.callback(&htim3);
-    assert(V_target.load() == 0.5f);
+    assert(V_target.load() == 1.0f);
     SetParameter(Id::TorqueLimit, 0.1f);
     htim3.callback(&htim3);
-    assert(Torque_target == 0.1f && V_target.load() == 0.2f);
+    assert(Torque_target == 0.1f && V_target.load() <= 0.7f);
+    for (unsigned cycle = 0; cycle < 20; ++cycle)
+    {
+        htim3.callback(&htim3);
+        assert(V_target.load() <= 0.7f);
+    }
+    assert(std::fabs(V_target.load() - 0.7f) < 0.0001f);
     ExpectResult(Send(Type::SetTorque, 0.0f), Result::Ok);
     htim3.callback(&htim3);
     assert(V_target.load() == 0.0f);
     // The absolute voltage ceiling also survives very large user-supplied finite limits.
     SetParameter(Id::Kp, 0.0f);
     SetParameter(Id::Ki, 0.0f);
+    SetParameter(Id::TorqueLimit, 10.0f);
+    ExpectResult(Send(Type::SetTorque, 8.9f), Result::Ok);
+    htim3.callback(&htim3);
+    // The margin is not added to feedforward, even when the ceiling clips at 18 V.
+    assert(std::fabs(V_target.load() - 17.8f) < 0.0001f);
+    SetParameter(Id::Kp, 2.0f);
+    htim3.callback(&htim3);
+    assert(V_target.load() == 18.0f);
+    SetParameter(Id::Kp, 0.0f);
     SetParameter(Id::TorqueLimit, std::numeric_limits<float>::max());
     ExpectResult(Send(Type::SetTorque, std::numeric_limits<float>::max()), Result::Ok);
     htim3.callback(&htim3);
@@ -192,7 +207,7 @@ void Exercise(const char* image)
     SetParameter(Id::ProcessNoise, 0.01f);
     ExpectResult(Send(Type::SetTorque, 2.0f), Result::Ok);
     SampleTorque(-1.0f);
-    std::puts("zero-feedback voltage envelope: 3 N.m held at 6 V for 10000 TIM3 cycles; target decrease, zero and 18 V ceiling passed");
+    std::puts("zero-feedback voltage envelope: 3 N.m held at 6.5 V for 10000 TIM3 cycles; unchanged feedforward, target decrease, zero and 18 V ceiling passed");
     spi_fail_next = true;
     tick += 60;
     RunTask(Task_get_torque, 1);
@@ -226,7 +241,7 @@ void Exercise(const char* image)
     htim3.callback(&htim3);
     htim2.callback(&htim2);
     assert(V_target.load() == 0.0f && htim1.compare == 0U);
-    // Manual voltage is not constrained by the retained 1.5 N.m torque target (3 V cap).
+    // Manual voltage is not constrained by the retained 1.5 N.m torque target (3.5 V cap).
     ExpectResult(Send(Type::SetVoltage, 5.0f), Result::Ok);
     spi_fail_next = true;
     tick += 60;

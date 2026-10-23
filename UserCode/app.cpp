@@ -90,6 +90,7 @@ void TIM2_Vout_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 constexpr float Vrange      = 0.0075f * 128;
 constexpr float TorqueRange = 20.0f;
 constexpr float Torque_per_volt = 0.5f; // Temporary calibration: N.m per volt.
+constexpr float Torque_voltage_margin = 0.5f; // Extra PID correction headroom in volts.
 
 void TIM3_Torque_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
@@ -107,12 +108,13 @@ void TIM3_Torque_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
         return;
     }
     // Bound before division so even a very large finite target cannot overflow.
-    const float voltage_limit = std::min(Torque_target, MAX_VOUT * Torque_per_volt) / Torque_per_volt;
+    const float feedforward = std::min(Torque_target, MAX_VOUT * Torque_per_volt) / Torque_per_volt;
+    const float voltage_limit = std::min(feedforward + Torque_voltage_margin, MAX_VOUT);
     Torque_pid->setOutputMax(voltage_limit);
     // Use the driver's feedforward and anti-windup, with unchanged discrete gains.
     const float voltage = Torque_pid->calc(Torque_target,
                                           Torque_feedback.load(std::memory_order_relaxed),
-                                          voltage_limit);
+                                          feedforward);
     if (!std::isfinite(voltage))
     {
         Torque_enabled = false;
