@@ -132,8 +132,8 @@ void Exercise(const char* image)
     assert(Torque_target == 0.0f);
     ExpectResult(Send(Type::SetTorqueEnabled, 0.0f, 1), Result::NotReady);
     assert(!pwm_started && !Torque_enabled);
-    SampleTorque(-1.0f);
-    assert(Torque_feedback_valid && std::fabs(Torque_feedback.load() - 1.0f) < 0.001f);
+    SampleTorque(-3.0f);
+    assert(Torque_feedback_valid && std::fabs(Torque_feedback.load() - 3.0f) < 0.001f);
     assert(!pwm_started);
 
     ExpectResult(Send(Type::SetTorque, 3.5f), Result::InvalidValue);
@@ -147,11 +147,52 @@ void Exercise(const char* image)
     const float first = V_target.load();
     htim3.callback(&htim3);
     const float second = V_target.load();
-    assert(std::fabs(first - 2.1f) < 0.003f && std::fabs(second - 2.2f) < 0.003f);
+    // 4 V feedforward minus discrete PI correction for 2 - 3 N.m error.
+    assert(std::fabs(first - 1.9f) < 0.003f && std::fabs(second - 1.8f) < 0.003f);
     htim2.callback(&htim2);
     assert(htim1.compare <= static_cast<uint32_t>(PWM_CNT_MAX));
-    std::printf("TIM3 discrete PID: first=%.3f V second=%.3f V; negative sensor reports %.3f magnitude\n",
+    std::printf("TIM3 feedforward plus discrete PID: first=%.3f V second=%.3f V; negative sensor reports %.3f magnitude\n",
                 first, second, Torque_feedback.load());
+    // With zero measured torque, P/I/D=0 still produces the driver's feedforward.
+    SetParameter(Id::Kp, 0.0f);
+    SetParameter(Id::Ki, 0.0f);
+    SetParameter(Id::ProcessNoise, 0.02f);
+    SampleTorque(0.0f);
+    ExpectResult(Send(Type::SetTorque, 1.25f), Result::Ok);
+    htim3.callback(&htim3);
+    assert(V_target.load() == 2.5f);
+    SetParameter(Id::Kp, 2.0f);
+    SetParameter(Id::Ki, 0.5f);
+    ExpectResult(Send(Type::SetTorque, 3.0f), Result::Ok);
+    for (unsigned cycle = 0; cycle < 10000; ++cycle)
+    {
+        htim3.callback(&htim3);
+        assert(V_target.load() == 6.0f);
+    }
+    // Lowering the selected target or its runtime limit constrains the next TIM3 output.
+    ExpectResult(Send(Type::SetTorque, 0.25f), Result::Ok);
+    htim3.callback(&htim3);
+    assert(V_target.load() == 0.5f);
+    SetParameter(Id::TorqueLimit, 0.1f);
+    htim3.callback(&htim3);
+    assert(Torque_target == 0.1f && V_target.load() == 0.2f);
+    ExpectResult(Send(Type::SetTorque, 0.0f), Result::Ok);
+    htim3.callback(&htim3);
+    assert(V_target.load() == 0.0f);
+    // The absolute voltage ceiling also survives very large user-supplied finite limits.
+    SetParameter(Id::Kp, 0.0f);
+    SetParameter(Id::Ki, 0.0f);
+    SetParameter(Id::TorqueLimit, std::numeric_limits<float>::max());
+    ExpectResult(Send(Type::SetTorque, std::numeric_limits<float>::max()), Result::Ok);
+    htim3.callback(&htim3);
+    assert(V_target.load() == 18.0f && Torque_enabled);
+    SetParameter(Id::TorqueLimit, 3.0f);
+    SetParameter(Id::Kp, 2.0f);
+    SetParameter(Id::Ki, 0.1f);
+    SetParameter(Id::ProcessNoise, 0.01f);
+    ExpectResult(Send(Type::SetTorque, 2.0f), Result::Ok);
+    SampleTorque(-1.0f);
+    std::puts("zero-feedback voltage envelope: 3 N.m held at 6 V for 10000 TIM3 cycles; target decrease, zero and 18 V ceiling passed");
     spi_fail_next = true;
     tick += 60;
     RunTask(Task_get_torque, 1);
@@ -185,11 +226,12 @@ void Exercise(const char* image)
     htim3.callback(&htim3);
     htim2.callback(&htim2);
     assert(V_target.load() == 0.0f && htim1.compare == 0U);
-    ExpectResult(Send(Type::SetVoltage, 2.0f), Result::Ok);
+    // Manual voltage is not constrained by the retained 1.5 N.m torque target (3 V cap).
+    ExpectResult(Send(Type::SetVoltage, 5.0f), Result::Ok);
     spi_fail_next = true;
     tick += 60;
     RunTask(Task_get_torque, 1);
-    assert(!Torque_feedback_valid && pwm_started && V_target.load() == 2.0f);
+    assert(!Torque_feedback_valid && pwm_started && V_target.load() == 5.0f);
     ExpectResult(Send(Type::SetVoltage, 0.0f), Result::Ok);
     SampleTorque(-1.0f);
     assert(Torque_feedback_valid && !Torque_enabled && !pwm_started);

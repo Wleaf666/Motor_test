@@ -89,6 +89,7 @@ void TIM2_Vout_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 
 constexpr float Vrange      = 0.0075f * 128;
 constexpr float TorqueRange = 20.0f;
+constexpr float Torque_per_volt = 0.5f; // Temporary calibration: N.m per volt.
 
 void TIM3_Torque_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
@@ -101,12 +102,17 @@ void TIM3_Torque_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
     if (Torque_target == 0.0f)
     {
         Torque_pid->reset();
+        Torque_pid->setOutputMax(0.0f);
         V_target.store(0.0f, std::memory_order_relaxed);
         return;
     }
-    // Discrete PIDMotor gains already include the configured TIM3 period. No dt scaling.
+    // Bound before division so even a very large finite target cannot overflow.
+    const float voltage_limit = std::min(Torque_target, MAX_VOUT * Torque_per_volt) / Torque_per_volt;
+    Torque_pid->setOutputMax(voltage_limit);
+    // Use the driver's feedforward and anti-windup, with unchanged discrete gains.
     const float voltage = Torque_pid->calc(Torque_target,
-                                          Torque_feedback.load(std::memory_order_relaxed));
+                                          Torque_feedback.load(std::memory_order_relaxed),
+                                          voltage_limit);
     if (!std::isfinite(voltage))
     {
         Torque_enabled = false;
@@ -115,7 +121,7 @@ void TIM3_Torque_pid_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
         V_target.store(0.0f, std::memory_order_relaxed);
         return;
     }
-    V_target.store(std::clamp(voltage, 0.0f, MAX_VOUT), std::memory_order_relaxed);
+    V_target.store(std::clamp(voltage, 0.0f, voltage_limit), std::memory_order_relaxed);
 }
 
 bool TIM_init()
