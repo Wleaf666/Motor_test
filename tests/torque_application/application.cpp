@@ -345,10 +345,17 @@ HAL_StatusTypeDef HAL_UART_Receive_DMA(UART_HandleTypeDef* uart, uint8_t* bytes,
     return HAL_UART_Receive_IT(uart, bytes, size);
 }
 HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef*) { rx_data = nullptr; return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef*) { tx_data = nullptr; return HAL_OK; }
-HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef*, const uint8_t* bytes, uint16_t size)
+HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef* uart)
+{
+    tx_data = nullptr;
+    uart->hdmatx->Remaining = 0;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef* uart, const uint8_t* bytes, uint16_t size)
 {
     if (tx_data != nullptr) return HAL_BUSY;
+    uart->hdmatx->Remaining = size;
+    uart->Flags &= ~UART_FLAG_TC;
     tx_data = bytes; tx_size = size; return HAL_OK;
 }
 HAL_StatusTypeDef HAL_FLASH_Unlock() { flash_locked = false; return HAL_OK; }

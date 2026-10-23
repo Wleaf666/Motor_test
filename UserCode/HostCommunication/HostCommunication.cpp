@@ -56,6 +56,33 @@ bool HostCommunication::HasPendingResponse() const
     return ResponsePending_.load(std::memory_order_acquire);
 }
 
+HAL_StatusTypeDef HostCommunication::AcquireTx()
+{
+    if (TxBusy_.load(std::memory_order_acquire))
+    {
+        auto* uart = huart();
+        // A zero DMA count alone is not enough: the UART may still shift the final byte.
+        // Conversely, TC may be stale while DMA still has bytes. Require both facts.
+        if (__HAL_DMA_GET_COUNTER(uart->hdmatx) != 0U ||
+            __HAL_UART_GET_FLAG(uart, UART_FLAG_TC) == RESET)
+        {
+            return HAL_BUSY;
+        }
+        // Quiesce old DMA/TC interrupts and restore HAL state before starting another frame.
+        // No timeout, busy-wait, reinitialization or application-side register writes.
+        const auto status = HAL_UART_AbortTransmit(uart);
+        if (status != HAL_OK)
+        {
+            return status;
+        }
+        TxBusy_.store(false, std::memory_order_release);
+    }
+
+    bool expected = false;
+    return TxBusy_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)
+        ? HAL_OK : HAL_BUSY;
+}
+
 HAL_StatusTypeDef HostCommunication::SendPendingResponse()
 {
     if (!Initialized_)
@@ -66,10 +93,10 @@ HAL_StatusTypeDef HostCommunication::SendPendingResponse()
     {
         return HAL_OK;
     }
-    bool expected = false;
-    if (!TxBusy_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    const auto acquired = AcquireTx();
+    if (acquired != HAL_OK)
     {
-        return HAL_BUSY;
+        return acquired;
     }
     TxBuffer_ = PendingResponse_;
     const auto status = HAL_UART_Transmit_DMA(huart(), TxBuffer_.data(), TxBuffer_.size());
@@ -90,10 +117,10 @@ HAL_StatusTypeDef HostCommunication::SendFeedback(float voltage, float torque)
     {
         return HAL_ERROR;
     }
-    bool expected = false;
-    if (!TxBusy_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    const auto acquired = AcquireTx();
+    if (acquired != HAL_OK)
     {
-        return HAL_BUSY;
+        return acquired;
     }
     if (!host_protocol::EncodeFeedback(voltage, torque, TxSequence_, TxBuffer_))
     {

@@ -33,6 +33,8 @@ private:
     using Receiver = protocol::UartRxSync<1, host_protocol::FrameSize, true>;
 
     bool CheckConfig() const;
+    // Single TX task only: never recycle storage before DMA and the UART wire are complete.
+    HAL_StatusTypeDef AcquireTx();
     bool RegisterCallbacks();
     static HostCommunication* FromHandle(UART_HandleTypeDef* huart);
     static void RxCompleteCallback(UART_HandleTypeDef* huart);

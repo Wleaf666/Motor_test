@@ -14,9 +14,11 @@ USART3：115200、8N1，无流控。PC10 为 TX、PC11 为 RX；使用 3.3 V 电
 - 命令任务顺序调用 `TakeCommand(Command&)`，在任务上下文执行命令，再调用 `PublishResponse(Response)`。仅有一个待发应答槽；已有应答时 `PublishResponse` 返回 `false`，原应答不变；非有限应答值也返回 `false`。`HasPendingResponse()` 为真时，`TakeCommand` 返回 `false` 且不消耗 FIFO。
 - **同一个发送任务独占** `SendPendingResponse()` 和 `SendFeedback()`，优先尝试应答。待发应答与活动 DMA 使用两个不同的持久帧缓冲区。应答只有在 HAL 成功提交 DMA 后才释放待发槽位，随后允许处理下一条命令，即使前一条应答仍在发送。
 - `SendPendingResponse()` 在没有应答时返回 `HAL_OK`，不启动 DMA；提交返回 `HAL_BUSY`、`HAL_ERROR` 或 `HAL_TIMEOUT` 时保留应答供之后重试。未初始化时两种发送方法均返回 `HAL_ERROR`。
-- 两种发送共用原子 TX 所有权标记；TX 忙时返回 `HAL_BUSY`，不得改写正在 DMA 读取的帧。只有发送完成回调或 TX DMA 错误后的**成功中止**才释放活动发送缓冲区；中止失败继续保持占用。RX 错误只重启 RX 同步，不释放正常 TX。
+- 两种发送共用原子 TX 所有权标记，不得改写正在 DMA 读取的帧。正常由发送完成回调释放；TX DMA 错误时仍要求成功中止。若回调丢失，下一次发送任务调用会同时检查 **TX DMA 剩余计数为零**、**UART TC 已置位**，两者均满足后调用 `HAL_UART_AbortTransmit()` 清理旧 DMA/TC 中断及 HAL 发送状态，成功后才复用缓冲、提交新帧。DMA 计数非零或 UART 仍在发送末字节时返回 `HAL_BUSY`；中止失败返回 HAL 错误并保留占用和待发应答。RX 错误不释放正常 TX。
 
 FIFO 是本模块的固定原子实现：已有 cpkg `libs::RingBuffer` 使用非原子索引，不满足此处 ISR/任务 SPSC 发布要求。CRC、UART 同步和 RX DMA 缓冲继续复用现有依赖。
+
+回调丢失恢复只在现有单发送任务中执行，使用 HAL 标志/计数接口和 HAL 中止 API，不增加计时器、超时清忙、忙等待或外设重新初始化。它不是 DMA 真正卡死的超时看门狗；硬件一直没有完成标志、初始化失败导致任务未创建、或上位机解析问题不在此恢复范围。已经成功提交的应答不因回调丢失自动重发，协议与序号策略不变；HAL/DMA/USART 中断仍须正常配置。
 
 ## 命令和控制边界
 
@@ -110,7 +112,7 @@ word1 是应用返回的有限 float32 数值：
 
 ## 主机回归入口
 
-`tests/host_communication/communication.cpp` 使用真实协议、`UartRxSync` 和 DMA 缓冲类型，配合模拟 HAL；覆盖独立生成的命令/应答黄金帧、逐位 CRC 损坏、全部参数 ID、保留字段、实际 FIFO8 顺序和溢出、单待发应答背压、HAL 提交失败重试、RX 恢复及 TX 缓冲区所有权。应用层控制、参数边界和 Flash 行为由应用/参数测试负责。
+`tests/host_communication/communication.cpp` 使用真实协议、`UartRxSync` 和 DMA 缓冲类型，配合模拟 HAL；覆盖独立生成的命令/应答黄金帧、逐位 CRC 损坏、全部参数 ID、保留字段、实际 FIFO8 顺序和溢出、单待发应答背压、HAL 提交失败重试、RX 恢复、TX 缓冲区所有权，以及 DMA 计数/TC 分阶段的回调丢失恢复、活动帧保护和中止失败保留。另执行实际发送任务的临时冒烟场景：连续丢弃 100 次 TX 完成回调、后接查询获得应答并恢复反馈；这是主机模拟，不是 USB 串口或实板证明。应用层控制、参数边界和 Flash 行为由应用/参数测试负责。
 
 已使用 WSL g++ 的 C++17 编译并执行上述主机回归；这不代表已通过真实串口或实板验证。在 WSL 工程目录运行：
 

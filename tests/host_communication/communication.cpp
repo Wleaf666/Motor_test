@@ -33,6 +33,7 @@ struct UartModel
     HAL_StatusTypeDef next_tx_status = HAL_OK;
     HAL_StatusTypeDef abort_tx_status = HAL_OK;
 } model;
+unsigned transmit_abort_calls = 0;
 
 // Generated independently with Python struct.pack and binascii.crc_hqx, not this codec.
 struct GoldenCommand
@@ -152,6 +153,8 @@ void Feed(UART_HandleTypeDef& uart, const Frame& frame)
 
 void TxComplete(UART_HandleTypeDef& uart)
 {
+    uart.hdmatx->Remaining = 0;
+    uart.Flags |= UART_FLAG_TC;
     model.tx_data = nullptr;
     model.tx_size = 0;
     uart.callbacks[HAL_UART_TX_COMPLETE_CB_ID](&uart);
@@ -452,6 +455,60 @@ void TestRecovery(HostCommunication& host, UART_HandleTypeDef& uart)
     std::puts("PASS RX stream/UART/DMA recovery, TX abort safety and legacy feedback sequence");
 }
 
+void TestMissingTxCompletion(HostCommunication& host, UART_HandleTypeDef& uart)
+{
+    const unsigned initial_aborts = transmit_abort_calls;
+    Check(host.SendFeedback(3.0f, 1.0f) == HAL_OK, "first disconnected feedback starts");
+    Frame active;
+    std::memcpy(active.data(), model.tx_data, active.size());
+    const uint8_t sequence = active[3];
+
+    // DMA still has bytes despite a stale UART TC flag: do not abort or reuse storage.
+    uart.Flags |= UART_FLAG_TC;
+    Check(host.SendFeedback(9.0f, 2.0f) == HAL_BUSY, "nonzero DMA count prevents premature recovery");
+    CheckTx(active);
+    Check(transmit_abort_calls == initial_aborts, "active DMA was not aborted");
+
+    // DMA finished reading memory, but the final UART stop bit has not left the wire.
+    uart.hdmatx->Remaining = 0;
+    uart.Flags &= ~UART_FLAG_TC;
+    Check(host.PublishResponse(ResponseGoldens[6].response), "response queued behind final UART byte");
+    Check(host.SendPendingResponse() == HAL_BUSY && host.HasPendingResponse(),
+          "UART TC is required and pending response remains intact");
+    CheckTx(active);
+    Check(transmit_abort_calls == initial_aborts, "incomplete wire transmission was not aborted");
+
+    // Hardware is fully complete, deliberately withhold the registered completion callback.
+    uart.Flags |= UART_FLAG_TC;
+    model.abort_tx_status = HAL_ERROR;
+    Check(host.SendPendingResponse() != HAL_OK && host.HasPendingResponse(),
+          "failed HAL quiescence must retain response and TX storage");
+    CheckTx(active);
+    model.abort_tx_status = HAL_OK;
+    Check(host.SendPendingResponse() == HAL_OK && !host.HasPendingResponse(),
+          "completed hardware without callback recovers and sends pending response");
+    CheckTx(ResponseGoldens[6].frame);
+    Check(model.rx_data != nullptr, "TX recovery leaves RX armed");
+
+    // Lose the response completion too; feedback must resume, without replaying the response.
+    uart.hdmatx->Remaining = 0;
+    uart.Flags |= UART_FLAG_TC;
+    Check(host.SendFeedback(4.0f, 2.0f) == HAL_OK && model.tx_data[2] == host_protocol::Feedback &&
+          model.tx_data[3] == static_cast<uint8_t>(sequence + 1U),
+          "feedback recovers after a lost response callback and advances its own sequence only once");
+    TxComplete(uart);
+    const unsigned recovered_aborts = transmit_abort_calls;
+    Check(host.SendFeedback(5.0f, 3.0f) == HAL_OK, "normal callback path still transmits");
+    TxComplete(uart);
+    Check(transmit_abort_calls == recovered_aborts, "normal callback path does not need an abort");
+    Feed(uart, CommandGoldens[7].frame);
+    Command command{};
+    Check(host.TakeCommand(command) && command.type == CommandType::GetState,
+          "receive commands still work after TX recovery");
+    Acknowledge(host, uart, command);
+    std::puts("PASS lost TX callbacks recover only after DMA zero and UART TC; active bytes and pending responses protected");
+}
+
 void TestTransport()
 {
     DMA_HandleTypeDef rx, tx;
@@ -466,6 +523,7 @@ void TestTransport()
     TestFifo(host, uart);
     TestBackpressure(host, uart);
     TestRecovery(host, uart);
+    TestMissingTxCompletion(host, uart);
 }
 } // namespace
 
@@ -489,16 +547,28 @@ HAL_StatusTypeDef HAL_UART_AbortReceive(UART_HandleTypeDef*)
     model.rx_data = nullptr; model.rx_size = model.rx_position = 0;
     return HAL_OK;
 }
-HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef*)
+HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef* uart)
 {
-    if (model.abort_tx_status == HAL_OK) { model.tx_data = nullptr; model.tx_size = 0; }
+    ++transmit_abort_calls;
+    if (model.abort_tx_status == HAL_OK)
+    {
+        model.tx_data = nullptr;
+        model.tx_size = 0;
+        uart->hdmatx->Remaining = 0;
+    }
     return model.abort_tx_status;
 }
-HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef*, const uint8_t* data, uint16_t size)
+HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef* uart, const uint8_t* data, uint16_t size)
 {
     const auto status = model.next_tx_status;
     model.next_tx_status = HAL_OK;
-    if (status == HAL_OK) { model.tx_data = data; model.tx_size = size; }
+    if (status == HAL_OK)
+    {
+        model.tx_data = data;
+        model.tx_size = size;
+        uart->hdmatx->Remaining = size;
+        uart->Flags &= ~UART_FLAG_TC;
+    }
     return status;
 }
 int main()
